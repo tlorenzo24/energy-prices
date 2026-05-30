@@ -1,7 +1,7 @@
 """Command-line interface for energy-prices.
 
-Commands: init-db, seed-demo, ingest, forecast, backtest, dashboard, scheduler.
-Run `energy --help` or `energy <command> --help` for details.
+Commands: init-db, seed-demo, ingest, backfill, gme-inspect, forecast, backtest,
+alerts, dashboard, scheduler. Run `energy --help` or `energy <command> --help`.
 """
 
 from __future__ import annotations
@@ -106,6 +106,9 @@ def forecast(
     market: str = typer.Option("all", help="all | elec | gas | ttf"),
     zone: str | None = typer.Option(None, help="Electricity zone (NORD…SARD or PUN)."),
     horizon_hours: int | None = typer.Option(None, help="Forecast horizon in hours."),
+    calibrate: bool = typer.Option(
+        False, "--calibrate", help="Conformalize (CQR) the intervals for honest coverage."
+    ),
 ) -> None:
     """Compute and persist probabilistic forecasts."""
     _setup_logging()
@@ -113,14 +116,16 @@ def forecast(
 
     market = market.lower()
     if market == "all":
-        saved = runner.run_all()
+        saved = runner.run_all(calibrate=calibrate)
     elif market in _MARKET_ALIASES and _MARKET_ALIASES[market] == Market.ELEC_DAYAHEAD.value:
         if zone:
-            saved = runner.run_forecasts(Market.ELEC_DAYAHEAD.value, zone.upper(), horizon_hours)
+            saved = runner.run_forecasts(
+                Market.ELEC_DAYAHEAD.value, zone.upper(), horizon_hours, calibrate=calibrate
+            )
         else:
-            saved = runner.run_all_electricity_zones()
+            saved = runner.run_all_electricity_zones(calibrate=calibrate)
     elif market in _MARKET_ALIASES:
-        saved = runner.run_forecasts(_MARKET_ALIASES[market], None, horizon_hours)
+        saved = runner.run_forecasts(_MARKET_ALIASES[market], None, horizon_hours, calibrate=calibrate)
     else:
         raise typer.BadParameter(f"unknown market {market!r}")
     console.print(f"[green]Saved {saved:,} forecast rows.[/]")
@@ -141,6 +146,9 @@ def backtest(
     model: str = typer.Option("lightgbm", help="baseline | lightgbm | lear | sarimax | ensemble"),
     horizon: int = typer.Option(24, help="Forecast horizon in periods per window."),
     windows: int = typer.Option(30, help="Number of rolling-origin windows."),
+    calibrate: bool = typer.Option(
+        False, "--calibrate", help="Wrap the model in CQR conformal calibration."
+    ),
 ) -> None:
     """Rolling-origin walk-forward backtest with rMAE / pinball / coverage metrics."""
     _setup_logging()
@@ -176,10 +184,17 @@ def backtest(
     if model not in _MODEL_FACTORIES and model != "ensemble":
         raise typer.BadParameter(f"unknown model {model!r}")
 
-    factory = make_factory()
+    base_factory = make_factory()
+    if calibrate:
+        from energy_prices.models.calibration import CalibratedForecaster
+
+        def factory():
+            return CalibratedForecaster(base_factory())
+    else:
+        factory = base_factory
     console.print(
-        f"Backtesting [cyan]{model}[/] on {market_value}/{lookup_zone or '-'} "
-        f"(horizon={horizon}, windows={windows})…"
+        f"Backtesting [cyan]{model}{'+cqr' if calibrate else ''}[/] on "
+        f"{market_value}/{lookup_zone or '-'} (horizon={horizon}, windows={windows})…"
     )
     result = walk_forward(y, factory, horizon=horizon, step=horizon, n_windows=windows)
     agg = result["aggregate"]
@@ -220,6 +235,83 @@ def scheduler(
     from energy_prices.ingestion.scheduler import start_scheduler
 
     start_scheduler(run_now=run_now)
+
+
+@app.command("gme-inspect")
+def gme_inspect_cmd(
+    segment: str = typer.Option("MGP", help="GME segment, e.g. MGP or MGP-GAS."),
+    data_name: str = typer.Option("ME_ZonalPrices", help="GME DataName."),
+    days: int = typer.Option(2, help="How many days back to sample."),
+) -> None:
+    """Fetch a small GME dataset and show its raw fields (validate the parser).
+
+    Requires GME credentials in .env. Use this once when real access arrives to
+    confirm the live field names/format before trusting ingestion.
+    """
+    _setup_logging()
+    import json
+
+    from energy_prices.ingestion.gme_client import inspect as gme_inspect
+
+    end = dt.datetime.now(dt.UTC).date()
+    info = gme_inspect(segment, data_name, end - dt.timedelta(days=days), end)
+    if not info.get("ok"):
+        console.print(f"[red]GME inspect failed:[/] {info.get('error')}")
+        raise typer.Exit(code=1)
+    console.print(f"[green]OK[/] {segment}/{data_name} {info['window']} — "
+                  f"{info['n_records']} records")
+    console.print(f"[bold]Field names:[/] {info['field_names']}")
+    console.print("[bold]Sample records:[/]")
+    console.print(json.dumps(info["samples"], indent=2, default=str, ensure_ascii=False))
+    console.print("[bold]Mapped preview (what the parser would store):[/]")
+    console.print(json.dumps(info["mapped_preview"], indent=2, default=str, ensure_ascii=False))
+
+
+@app.command()
+def backfill(
+    start: str = typer.Option(..., "--from", help="Start date YYYY-MM-DD (e.g. 2015-01-01)."),
+    end: str | None = typer.Option(None, "--to", help="End date YYYY-MM-DD (default: today)."),
+    source: str = typer.Option("all", help="all | entsoe | gme | ttf | gie | weather"),
+    chunk_days: int = typer.Option(180, help="Days per request chunk."),
+) -> None:
+    """Historical backfill in bounded chunks (respects API query/quotas limits)."""
+    _setup_logging()
+    from energy_prices.ingestion.scheduler import run_backfill
+    from energy_prices.storage.db import init_db
+
+    init_db()
+    totals = run_backfill(
+        source=source, start=_parse_date(start), end=_parse_date(end), chunk_days=chunk_days
+    )
+    table = Table(title="Backfill results")
+    table.add_column("Source")
+    table.add_column("Rows", justify="right")
+    for name, rows in totals.items():
+        table.add_row(name, f"{rows:,}")
+    console.print(table)
+
+
+@app.command()
+def alerts() -> None:
+    """Evaluate the default price-alert rules against the latest forecasts."""
+    _setup_logging()
+    from energy_prices.alerts import evaluate_alerts
+    from energy_prices.storage.db import session_scope
+
+    with session_scope() as session:
+        triggered = evaluate_alerts(session)
+    if not triggered:
+        console.print("[green]Nessun alert.[/] Tutte le previsioni sono entro le soglie.")
+        return
+    table = Table(title=f"⚠️  {len(triggered)} alert attivi")
+    table.add_column("Regola")
+    table.add_column("Valore peggiore", justify="right")
+    table.add_column("Quando")
+    table.add_column("Step")
+    for a in triggered:
+        when = a["worst_target"].strftime("%Y-%m-%d %H:%M") if a.get("worst_target") else "—"
+        table.add_row(a["rule"], f"{a['worst_value']:.1f} €/MWh", when, str(a["n_crossings"]))
+    console.print(table)
 
 
 if __name__ == "__main__":  # pragma: no cover

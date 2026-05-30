@@ -524,6 +524,58 @@ def _build_price_obs(
     }
 
 
+def inspect(
+    segment: str = "MGP",
+    data_name: str = "ME_ZonalPrices",
+    start: dt.date | None = None,
+    end: dt.date | None = None,
+) -> dict[str, Any]:
+    """Fetch a small GME dataset and report its raw structure for validation.
+
+    Use this once when real credentials arrive to confirm the live field names /
+    formats before trusting the parser. Returns a diagnostics dict (never raises
+    for the common no-credentials case): keys ``ok``, ``n_records``,
+    ``field_names`` (union across the sample), ``samples`` (first raw records),
+    ``mapped_preview`` (what _build_price_obs would produce), and any ``error``.
+    """
+    settings = get_settings()
+    if not settings.has_gme:
+        return {"ok": False, "error": "GME credentials not configured (.env)."}
+
+    end = end or dt.datetime.now(tz=_UTC).date()
+    start = start or (end - dt.timedelta(days=2))
+    try:
+        client = GmeClient()
+        client.authenticate()
+        attrs = _quarter_attributes(start, end) if data_name == "ME_ZonalPrices" else {}
+        records = client.request_data(segment, data_name, start, end, attrs)
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not crash the CLI
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    field_names: set[str] = set()
+    for rec in records[:50]:
+        field_names.update(rec.keys())
+
+    mapped_preview: list[dict[str, Any]] = []
+    is_elec = segment in ("MGP", "MI-A1", "MI-A2", "MI-A3")
+    for rec in records[:3]:
+        lookup = _build_lookup(rec)
+        zone = _map_zone(_first(lookup, _ZONE_KEYS)) if is_elec else None
+        market = Market.ELEC_DAYAHEAD.value if is_elec else Market.GAS_DAYAHEAD.value
+        mapped_preview.append(_build_price_obs(lookup, market, zone) or {"<unmapped>": rec})
+
+    return {
+        "ok": True,
+        "segment": segment,
+        "data_name": data_name,
+        "window": f"{start}..{end}",
+        "n_records": len(records),
+        "field_names": sorted(field_names),
+        "samples": records[:3],
+        "mapped_preview": mapped_preview,
+    }
+
+
 def ingest(session: Session, start: dt.date, end: dt.date) -> int:
     """Ingest GME zonal/PUN + gas day-ahead prices for [start, end] (inclusive).
 

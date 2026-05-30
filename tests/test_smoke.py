@@ -153,3 +153,51 @@ def test_gas_forecast_uses_ensemble(tmp_db):
         run_at = ForecastRepository(s).latest_run_at(Market.GAS_DAYAHEAD.value)
         fc = ForecastRepository(s).get_forecasts(Market.GAS_DAYAHEAD.value, run_at=run_at)
     assert not fc.empty
+
+
+# --- Calibration (CQR) ------------------------------------------------------
+def test_calibrated_forecaster_runs_and_calibrates():
+    from energy_prices.models.baseline import SeasonalNaiveForecaster
+    from energy_prices.models.calibration import CalibratedForecaster
+
+    idx = pd.date_range("2024-01-01", periods=24 * 60, freq="h", tz="UTC")
+    rng = np.random.default_rng(3)
+    y = pd.Series(
+        np.sin(np.arange(len(idx)) / 24.0 * 2 * np.pi) * 15 + 100 + rng.normal(0, 5, len(idx)),
+        index=idx, name="price",
+    )
+    horizon = pd.date_range(idx[-1] + pd.Timedelta(hours=1), periods=24, freq="h", tz="UTC")
+
+    cal = CalibratedForecaster(SeasonalNaiveForecaster(), cal_fraction=0.25)
+    res = cal.fit_predict(y, horizon)
+    assert res.model_name.endswith("+cqr")
+    assert cal._offset_by_level  # calibration actually ran
+    vals = res.quantiles[_Q_COLS].to_numpy(dtype=float)
+    assert np.all(np.diff(vals, axis=1) >= -1e-6)  # non-crossing after widening
+
+
+# --- Alerts -----------------------------------------------------------------
+def test_alerts_trigger_and_clear(tmp_db):
+    import datetime as dt
+
+    from energy_prices.alerts import AlertRule, evaluate_alerts
+    from energy_prices.config import Market
+    from energy_prices.storage.db import session_scope
+    from energy_prices.storage.repositories import ForecastRepository
+
+    run = dt.datetime(2026, 5, 30, tzinfo=dt.UTC)
+    target = dt.datetime(2026, 5, 31, tzinfo=dt.UTC)
+    with session_scope() as s:
+        ForecastRepository(s).save([{
+            "run_at": run, "market": Market.GAS_DAYAHEAD.value, "zone": None,
+            "target_start": target, "resolution_minutes": 1440,
+            "model_name": "test", "quantile": 0.5, "value": 80.0,
+        }])
+
+    hit_rule = AlertRule(Market.GAS_DAYAHEAD.value, None, 60.0, "above", 0.5)
+    miss_rule = AlertRule(Market.GAS_DAYAHEAD.value, None, 100.0, "above", 0.5)
+    with session_scope() as s:
+        hit = evaluate_alerts(s, [hit_rule])
+        miss = evaluate_alerts(s, [miss_rule])
+    assert len(hit) == 1 and hit[0]["worst_value"] == 80.0
+    assert miss == []

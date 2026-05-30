@@ -74,6 +74,38 @@ def run_ingestion(
     return results
 
 
+def run_backfill(
+    source: str = "all",
+    start: dt.date | None = None,
+    end: dt.date | None = None,
+    chunk_days: int = 180,
+) -> dict[str, int]:
+    """Historical backfill: ingest a wide range in bounded chunks.
+
+    Chunking keeps each request within ENTSO-E's ~1-year query cap and GME's
+    per-call quotas, and lets a long backfill make steady, resumable progress
+    (each chunk commits independently). Returns cumulative {source: rows}.
+    """
+    today = dt.datetime.now(dt.UTC).date()
+    start = start or dt.date(2015, 1, 1)
+    end = end or today
+    if start > end:
+        raise ValueError(f"start {start} is after end {end}")
+
+    totals: dict[str, int] = {}
+    cursor = start
+    step = dt.timedelta(days=max(1, chunk_days))
+    while cursor <= end:
+        chunk_end = min(cursor + step - dt.timedelta(days=1), end)
+        logger.info("backfill chunk %s..%s (source=%s)", cursor, chunk_end, source)
+        chunk = run_ingestion(source=source, start=cursor, end=chunk_end)
+        for name, rows in chunk.items():
+            totals[name] = totals.get(name, 0) + rows
+        cursor = chunk_end + dt.timedelta(days=1)
+    logger.info("backfill complete %s..%s: %s", start, end, totals)
+    return totals
+
+
 def daily_job() -> None:
     """Full daily cycle: ingest all sources, then recompute all forecasts."""
     logger.info("daily_job: starting ingestion")

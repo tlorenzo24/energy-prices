@@ -100,8 +100,11 @@ src/energy_prices/
 | `energy init-db` | crea le tabelle (e hypertable Timescale su Postgres) |
 | `energy seed-demo` | genera dati sintetici per la demo |
 | `energy ingest --source all` | scarica i dati reali (ENTSO-E/GME/TTF/fondamentali) |
-| `energy forecast --market elec\|gas [--zone NORD]` | calcola e salva i forecast |
-| `energy backtest --market elec --zone NORD` | walk-forward + metriche (rMAE/CRPS) |
+| `energy backfill --from 2015-01-01` | backfill storico a blocchi (rispetta i limiti API) |
+| `energy gme-inspect` | scarica un campione GME e mostra i campi reali (valida il parser) |
+| `energy forecast --market elec\|gas [--zone NORD] [--calibrate]` | calcola e salva i forecast (`--calibrate` = intervalli CQR onesti) |
+| `energy backtest --market elec --zone NORD [--calibrate]` | walk-forward + metriche (rMAE/CRPS/coverage) |
+| `energy alerts` | valuta le regole di alert prezzo sui forecast più recenti |
 | `energy dashboard` | avvia la dashboard Streamlit |
 | `energy scheduler` | loop schedulato (ingest + forecast giornalieri) |
 

@@ -290,14 +290,21 @@ def _fit_predict_with_fallback(
     horizon_index: pd.DatetimeIndex,
     exog: pd.DataFrame | None,
     exog_future: pd.DataFrame | None,
+    calibrate: bool = False,
 ):
     """Fit the primary model and predict; fall back to seasonal-naive on failure.
 
     Returns a :class:`ForecastResult`. The seasonal-naive baseline ignores exog
-    and depends only on core deps, so it is a dependable last resort.
+    and depends only on core deps, so it is a dependable last resort. When
+    ``calibrate`` is set, the primary model is wrapped in a CQR
+    :class:`CalibratedForecaster` for honest interval coverage.
     """
     try:
         model = _select_model(market)
+        if calibrate:
+            from energy_prices.models.calibration import CalibratedForecaster
+
+            model = CalibratedForecaster(model)
         result = model.fit_predict(
             y, horizon_index, exog=exog, exog_future=exog_future
         )
@@ -323,6 +330,7 @@ def run_forecasts(
     horizon_hours: int | None = None,
     run_at: dt.datetime | None = None,
     session: Session | None = None,
+    calibrate: bool = False,
 ) -> int:
     """Generate and persist a probabilistic forecast for one ``(market, zone)``.
 
@@ -357,12 +365,12 @@ def run_forecasts(
 
     if session is not None:
         return _run_forecasts_with_session(
-            session, market, zone, horizon_hours, run_at
+            session, market, zone, horizon_hours, run_at, calibrate
         )
 
     with session_scope() as scoped:
         return _run_forecasts_with_session(
-            scoped, market, zone, horizon_hours, run_at
+            scoped, market, zone, horizon_hours, run_at, calibrate
         )
 
 
@@ -372,6 +380,7 @@ def _run_forecasts_with_session(
     zone: str | None,
     horizon_hours: int | None,
     run_at: dt.datetime,
+    calibrate: bool = False,
 ) -> int:
     """Core run logic against an already-open session (no commit handling)."""
     prices = PriceRepository(session)
@@ -401,7 +410,7 @@ def _run_forecasts_with_session(
     )
 
     result = _fit_predict_with_fallback(
-        market, y, horizon_index, exog_history, exog_future
+        market, y, horizon_index, exog_history, exog_future, calibrate
     )
 
     rows = result.to_rows(
@@ -424,7 +433,7 @@ def _run_forecasts_with_session(
     return saved
 
 
-def run_all_electricity_zones(session: Session | None = None) -> int:
+def run_all_electricity_zones(session: Session | None = None, calibrate: bool = False) -> int:
     """Run electricity forecasts for every physical zone plus the PUN index.
 
     Returns the total number of forecast rows saved across all zones.
@@ -433,25 +442,27 @@ def run_all_electricity_zones(session: Session | None = None) -> int:
     zones = [z.value for z in MARKET_ZONES] + [Zone.PUN.value]
 
     if session is not None:
-        return _run_zones(session, zones, run_at)
+        return _run_zones(session, zones, run_at, calibrate)
 
     with session_scope() as scoped:
-        return _run_zones(scoped, zones, run_at)
+        return _run_zones(scoped, zones, run_at, calibrate)
 
 
-def _run_zones(session: Session, zones: list[str], run_at: dt.datetime) -> int:
+def _run_zones(
+    session: Session, zones: list[str], run_at: dt.datetime, calibrate: bool = False
+) -> int:
     total = 0
     for zone in zones:
         try:
             total += _run_forecasts_with_session(
-                session, Market.ELEC_DAYAHEAD.value, zone, None, run_at
+                session, Market.ELEC_DAYAHEAD.value, zone, None, run_at, calibrate
             )
         except Exception as exc:  # noqa: BLE001 - isolate per-zone failures
             logger.exception("Forecast run failed for elec zone=%s: %s", zone, exc)
     return total
 
 
-def run_all(session: Session | None = None) -> int:
+def run_all(session: Session | None = None, calibrate: bool = False) -> int:
     """Run the full batch: all electricity zones + PUN, gas day-ahead and TTF.
 
     Returns the total number of forecast rows saved.
@@ -459,23 +470,27 @@ def run_all(session: Session | None = None) -> int:
     run_at = dt.datetime.now(dt.UTC)
 
     if session is not None:
-        return _run_all_with_session(session, run_at)
+        return _run_all_with_session(session, run_at, calibrate)
 
     with session_scope() as scoped:
-        return _run_all_with_session(scoped, run_at)
+        return _run_all_with_session(scoped, run_at, calibrate)
 
 
-def _run_all_with_session(session: Session, run_at: dt.datetime) -> int:
+def _run_all_with_session(
+    session: Session, run_at: dt.datetime, calibrate: bool = False
+) -> int:
     total = 0
 
     # Electricity: physical zones + PUN.
     zones = [z.value for z in MARKET_ZONES] + [Zone.PUN.value]
-    total += _run_zones(session, zones, run_at)
+    total += _run_zones(session, zones, run_at, calibrate)
 
     # Gas day-ahead (national, zone=None).
     for market in (Market.GAS_DAYAHEAD.value, Market.TTF.value):
         try:
-            total += _run_forecasts_with_session(session, market, None, None, run_at)
+            total += _run_forecasts_with_session(
+                session, market, None, None, run_at, calibrate
+            )
         except Exception as exc:  # noqa: BLE001 - isolate per-market failures
             logger.exception("Forecast run failed for market=%s: %s", market, exc)
 
