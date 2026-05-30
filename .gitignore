@@ -226,6 +226,12 @@ data/processed/
 data/parquet/
 *.sqlite
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/ca-bundle.pem
+scripts/*.out
+scripts/*.err
 models/artifacts/
 src/energy_prices/models/artifacts/
 *.joblib

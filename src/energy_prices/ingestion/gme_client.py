@@ -24,9 +24,17 @@ wall-clock (Europe/Rome) to a tz-aware UTC ``delivery_start``, handling the
 
 DEFENSIVE NOTES: the public schema varies by dataset/over time, so field names
 are matched case-insensitively against several aliases (see the ``*_KEYS`` and
-``*_ALIASES`` tables below). The gas DataName / price field in particular are
-best-effort (GAS_PGasResults / MGP-GAS; price field PGas / Price, EUR/MWh) and
-should be confirmed against live GME responses.
+``*_ALIASES`` tables below).
+
+GAS day-ahead (validated against the live API + technical guide, 2026-05-30):
+the MGP-GAS auction is ``Segment="MGP-GAS"``, ``DataName="GAS_MGASAuctionResults"``
+(NOT ``GAS_PGasResults`` — that is the P-GAS Import/Royalties/ex-Dlgs market on
+segments IM/RO/SV). Fields: ``FlowDate`` (yyyyMMdd, the SESSION/auction day),
+``Market``, ``Product`` (e.g. ``"MGP-2026-05-26"`` — the **delivery** gas day),
+``Price`` (EUR/MWh remuneration price), plus volume columns. Because a day-ahead
+auction on day D clears the price for delivery on day D+1, we anchor each row to
+the delivery date taken from ``Product`` (falling back to FlowDate+1), at 00:00
+UTC, so gas aligns on the same daily grid as the TTF benchmark.
 """
 
 from __future__ import annotations
@@ -36,7 +44,10 @@ import datetime as dt
 import io
 import json
 import logging
+import re
+import time
 import zipfile
+from email.utils import parsedate_to_datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -44,6 +55,7 @@ import requests
 from lxml import etree
 from sqlalchemy.orm import Session
 from tenacity import (
+    RetryCallState,
     retry,
     retry_if_exception_type,
     stop_after_attempt,
@@ -62,6 +74,18 @@ _UTC = dt.UTC
 
 # Default request timeout (connect, read) in seconds.
 _TIMEOUT = (10, 60)
+
+# Politeness throttle: minimum seconds between successive GME requests on one
+# client, to stay under the API's rate limit (we hit 429 on rapid backfill).
+_MIN_REQUEST_INTERVAL = 1.5
+
+# Retry policy for transient GME failures (429 / 5xx / network). More attempts +
+# a higher cap than the library default, because 429 backoff may need to be long.
+_MAX_RETRY_ATTEMPTS = 6
+_RETRY_WAIT_MAX = 120
+# Upper bound on how long we will honor a server-sent Retry-After (defensive
+# against an absurd value pinning a backfill for hours).
+_MAX_RETRY_AFTER = 300
 
 # Physical zonal codes as they appear in GME payloads -> our Zone enum value.
 # Keyed by the normalised (upper, alnum-only) token; built once at import time.
@@ -89,6 +113,13 @@ _HOUR_KEYS = ("hour", "ora", "ore")
 _QUARTER_KEYS = ("period", "periodo", "quarter", "interval", "subhour", "subperiod", "qh", "quartodora")
 _ZONE_KEYS = ("zone", "zona", "biddingzone", "marketzone", "area")
 _PRICE_KEYS = ("price", "prezzo", "value", "valore", "pun", "pgas", "prezzounico")
+
+# Gas day-ahead (MGP-GAS auction): the single validated Segment/DataName pair.
+_GAS_SEGMENT = "MGP-GAS"
+_GAS_DATA_NAME = "GAS_MGASAuctionResults"
+# The Product field carries the delivery gas day, e.g. "MGP-2026-05-26".
+_GAS_PRODUCT_KEYS = ("product", "prodotto")
+_PRODUCT_DATE_RE = re.compile(r"(\d{4})[-/]?(\d{2})[-/]?(\d{2})")
 
 
 class GmeError(RuntimeError):
@@ -192,6 +223,43 @@ def _is_retryable(exc: BaseException) -> bool:
     return False
 
 
+def _parse_retry_after(resp: requests.Response | None) -> float | None:
+    """Return the ``Retry-After`` delay in seconds (delta or HTTP-date), if any."""
+    if resp is None:
+        return None
+    value = resp.headers.get("Retry-After")
+    if not value:
+        return None
+    value = value.strip()
+    if value.isdigit():
+        return min(float(value), _MAX_RETRY_AFTER)
+    try:  # HTTP-date form
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=_UTC)
+    delta = (when - dt.datetime.now(tz=_UTC)).total_seconds()
+    return min(max(delta, 0.0), _MAX_RETRY_AFTER) if delta > 0 else None
+
+
+def _gme_retry_wait(retry_state: RetryCallState) -> float:
+    """Exponential backoff that honours a server ``Retry-After`` on 429 responses."""
+    base = wait_exponential(multiplier=1, min=2, max=_RETRY_WAIT_MAX)(retry_state)
+    outcome = retry_state.outcome
+    if outcome is None or not outcome.failed:
+        return base
+    exc = outcome.exception()
+    if isinstance(exc, requests.HTTPError):
+        retry_after = _parse_retry_after(exc.response)
+        if retry_after is not None:
+            logger.info("GME asked to wait %.0fs (Retry-After); backing off.", retry_after)
+            return max(base, retry_after)
+    return base
+
+
 class GmeClient:
     """Thin authenticated client over the GME PublicMarketResults REST API."""
 
@@ -210,15 +278,25 @@ class GmeClient:
         self._timeout = timeout
         self._http = session or requests.Session()
         self._token: str | None = None
+        self._min_interval = _MIN_REQUEST_INTERVAL
+        self._last_request_at: float | None = None
 
     # -- low level ---------------------------------------------------------
+
+    def _throttle(self) -> None:
+        """Sleep just enough to keep >= ``_min_interval`` between requests."""
+        if self._min_interval <= 0 or self._last_request_at is None:
+            return
+        elapsed = time.monotonic() - self._last_request_at
+        if elapsed < self._min_interval:
+            time.sleep(self._min_interval - elapsed)
 
     @retry(
         retry=retry_if_exception_type(
             (requests.ConnectionError, requests.Timeout, requests.HTTPError)
         ),
-        stop=stop_after_attempt(4),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
+        stop=stop_after_attempt(_MAX_RETRY_ATTEMPTS),
+        wait=_gme_retry_wait,
         reraise=True,
     )
     def _post(self, path: str, payload: dict[str, Any], auth: bool) -> requests.Response:
@@ -228,6 +306,8 @@ class GmeClient:
                 self.authenticate()
             headers["Authorization"] = f"Bearer {self._token}"
         url = f"{self.base_url}/{path.lstrip('/')}"
+        self._throttle()
+        self._last_request_at = time.monotonic()
         resp = self._http.post(url, json=payload, headers=headers, timeout=self._timeout)
         if auth and resp.status_code == 401:  # stale token: refresh once, then retry
             logger.info("GME token rejected (401); re-authenticating.")
@@ -304,33 +384,31 @@ class GmeClient:
         return observations
 
     def fetch_gas_dayahead(self, start: dt.date, end: dt.date) -> list[dict[str, Any]]:
-        """Fetch MGP-GAS day-ahead prices as PriceRepository observation dicts.
+        """Fetch MGP-GAS day-ahead auction prices as PriceRepository obs dicts.
 
-        ``market=Market.GAS_DAYAHEAD.value``, ``zone=None``. The gas DataName /
-        field names are best-effort (see module docstring): we try a couple of
-        known DataNames and parse defensively. Gas day-ahead is a single national
-        daily price, so resolution is DAILY (1440 minutes) when no hour is given.
+        ``market=Market.GAS_DAYAHEAD.value``, ``zone=None``. Uses the validated
+        ``Segment="MGP-GAS"`` / ``DataName="GAS_MGASAuctionResults"`` pair. Each
+        record is anchored to its DELIVERY gas day (from the ``Product`` field,
+        e.g. ``"MGP-2026-05-26"``; falling back to FlowDate+1) at 00:00 UTC, with
+        DAILY (1440-minute) resolution. If multiple rows resolve to the same
+        delivery day, the last one wins.
+
+        ``start``/``end`` bound the *session* (auction) window, matching how the
+        API filters on FlowDate; the resulting delivery days therefore run from
+        ``start+1`` to ``end+1``.
         """
-        records: list[dict[str, Any]] = []
-        last_exc: Exception | None = None
-        for data_name in ("GAS_PGasResults", "MGP-GAS", "MGPGAS_Prices"):
-            try:
-                records = self.request_data("MGP-GAS", data_name, start, end, {})
-                if records:
-                    break
-            except (GmeError, requests.RequestException) as exc:  # try next name
-                last_exc = exc
-                logger.debug("GME gas DataName %s failed: %s", data_name, exc)
-        if not records and last_exc is not None:
-            logger.warning("GME gas day-ahead unavailable: %s", last_exc)
-            return []
+        records = self.request_data(_GAS_SEGMENT, _GAS_DATA_NAME, start, end, {})
 
-        observations: list[dict[str, Any]] = []
+        by_delivery: dict[dt.datetime, dict[str, Any]] = {}
         for rec in records:
-            obs = _build_price_obs(_build_lookup(rec), Market.GAS_DAYAHEAD.value, None)
+            obs = _build_gas_obs(_build_lookup(rec))
             if obs is not None:
-                observations.append(obs)
-        logger.info("GME gas day-ahead %s..%s -> %d observations.", start, end, len(observations))
+                by_delivery[obs["delivery_start"]] = obs
+        observations = list(by_delivery.values())
+        logger.info(
+            "GME gas day-ahead sessions %s..%s -> %d daily observations.",
+            start, end, len(observations),
+        )
         return observations
 
 
@@ -533,6 +611,54 @@ def _build_price_obs(
     }
 
 
+def _gas_delivery_date(lookup: dict[str, Any], flow_date: dt.date) -> dt.date:
+    """Resolve the delivery gas day for an MGP-GAS auction record.
+
+    The day-ahead auction on session day D clears delivery for D+1. The exact
+    delivery day is carried by ``Product`` (``"MGP-YYYY-MM-DD"``); we parse it,
+    falling back to ``flow_date + 1`` when the product is missing/unparseable.
+    """
+    product = _first(lookup, _GAS_PRODUCT_KEYS)
+    if product is not None:
+        match = _PRODUCT_DATE_RE.search(str(product))
+        if match:
+            try:
+                return dt.date(int(match[1]), int(match[2]), int(match[3]))
+            except ValueError:
+                pass
+    return flow_date + dt.timedelta(days=1)
+
+
+def _build_gas_obs(lookup: dict[str, Any]) -> dict[str, Any] | None:
+    """Build one gas day-ahead observation from a parsed MGP-GAS record.
+
+    Anchored to the delivery gas day at 00:00 UTC (DAILY resolution) so it lines
+    up with the TTF benchmark grid. Returns None if the date or price is missing.
+    """
+    date_raw = _first(lookup, _DATE_KEYS)
+    price = _as_float(_first(lookup, _PRICE_KEYS))
+    if date_raw is None or price is None:
+        return None
+    try:
+        flow_date = _parse_flow_date(date_raw)
+    except (ValueError, TypeError):
+        return None
+
+    delivery_date = _gas_delivery_date(lookup, flow_date)
+    delivery_start = dt.datetime(
+        delivery_date.year, delivery_date.month, delivery_date.day, tzinfo=_UTC
+    )
+    return {
+        "market": Market.GAS_DAYAHEAD.value,
+        "zone": None,
+        "delivery_start": delivery_start,
+        "resolution_minutes": 1440,
+        "price": price,
+        "source": SOURCE,
+        "unit": "EUR/MWh",
+    }
+
+
 def inspect(
     segment: str = "MGP",
     data_name: str = "ME_ZonalPrices",
@@ -567,11 +693,16 @@ def inspect(
 
     mapped_preview: list[dict[str, Any]] = []
     is_elec = segment in ("MGP", "MI-A1", "MI-A2", "MI-A3")
+    is_gas_da = segment == _GAS_SEGMENT and data_name == _GAS_DATA_NAME
     for rec in records[:3]:
         lookup = _build_lookup(rec)
-        zone = _map_zone(_first(lookup, _ZONE_KEYS)) if is_elec else None
-        market = Market.ELEC_DAYAHEAD.value if is_elec else Market.GAS_DAYAHEAD.value
-        mapped_preview.append(_build_price_obs(lookup, market, zone) or {"<unmapped>": rec})
+        if is_gas_da:
+            mapped = _build_gas_obs(lookup)
+        else:
+            zone = _map_zone(_first(lookup, _ZONE_KEYS)) if is_elec else None
+            market = Market.ELEC_DAYAHEAD.value if is_elec else Market.GAS_DAYAHEAD.value
+            mapped = _build_price_obs(lookup, market, zone)
+        mapped_preview.append(mapped or {"<unmapped>": rec})
 
     return {
         "ok": True,
@@ -585,13 +716,19 @@ def inspect(
     }
 
 
-def ingest(session: Session, start: dt.date, end: dt.date) -> int:
+def ingest(
+    session: Session, start: dt.date, end: dt.date, skip_gas: bool = False
+) -> int:
     """Ingest GME zonal/PUN + gas day-ahead prices for [start, end] (inclusive).
 
     Writes through PriceRepository and records an IngestionRun. Returns the
     number of price observations upserted. If GME credentials are not configured
     (``not settings.has_gme``) this logs a warning and returns 0 (no-op), so the
     pipeline can run in ENTSO-E-only / demo mode.
+
+    Set ``skip_gas=True`` to fetch only the zonal/PUN electricity data and omit
+    the gas sub-request — this halves the API calls per window, which helps long
+    backfills stay under the GME rate limit.
     """
     settings = get_settings()
     if not settings.has_gme:
@@ -607,11 +744,12 @@ def ingest(session: Session, start: dt.date, end: dt.date) -> int:
         client = GmeClient()
         client.authenticate()
         observations = client.fetch_zonal_prices(start, end)
-        try:
-            observations += client.fetch_gas_dayahead(start, end)
-        except (GmeError, requests.RequestException) as exc:
-            # Gas is secondary: don't fail the whole run if it's unavailable.
-            logger.warning("GME gas day-ahead ingestion failed: %s", exc)
+        if not skip_gas:
+            try:
+                observations += client.fetch_gas_dayahead(start, end)
+            except (GmeError, requests.RequestException) as exc:
+                # Gas is secondary: don't fail the whole run if it's unavailable.
+                logger.warning("GME gas day-ahead ingestion failed: %s", exc)
 
         total = prices.upsert(observations)
         runs.finish(run, "success", dt.datetime.now(tz=_UTC), rows=total,

@@ -434,6 +434,29 @@ def _sidebar(tz: str) -> dict[str, Any]:
 # --- Main ------------------------------------------------------------------
 
 
+def _require_password(settings) -> bool:
+    """Shared-secret gate for internal sharing. No-op if no password is set.
+
+    Returns True when access is granted. Defence-in-depth only: pair it with a
+    VPN / network isolation (see README deploy notes) — it is NOT a substitute
+    for real per-user auth (use Streamlit native OIDC for that).
+    """
+    if not settings.dashboard_password:
+        return True
+    if st.session_state.get("_authed"):
+        return True
+    st.title("🔒 energy-prices")
+    pwd = st.text_input("Password", type="password")
+    if not pwd:
+        st.stop()
+    if pwd == settings.dashboard_password:
+        st.session_state["_authed"] = True
+        st.rerun()
+    st.error("Password errata.")
+    st.stop()
+    return False
+
+
 def main() -> None:
     settings = get_settings()
     tz = settings.timezone
@@ -443,6 +466,7 @@ def main() -> None:
         page_icon="⚡",
         layout="wide",
     )
+    _require_password(settings)
     st.title("GME — Prezzi Energia & Previsioni")
 
     if settings.demo_mode:

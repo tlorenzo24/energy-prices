@@ -41,6 +41,33 @@ class Settings(BaseSettings):
     agsi_api_key: str | None = None
     eia_api_key: str | None = None
 
+    # --- Scheduler (daily ingest + forecast loop) ---
+    # GME publishes the MGP results around 13:00–13:30 CET; the daily job runs a
+    # little after to be safe. All overridable via ENERGY_SCHEDULER_* env vars.
+    scheduler_hour: int = 13
+    scheduler_minute: int = 30
+    scheduler_run_on_start: bool = True
+    # Grace window (seconds) for a missed fire (e.g. machine asleep / GME late).
+    scheduler_misfire_grace: int = 3600
+
+    # --- Alert delivery (webhook + email) ---
+    # n8n (cloud or self-hosted) webhook: triggered alerts are POSTed as JSON.
+    alert_webhook_url: str | None = None
+    alert_webhook_token: str | None = None  # optional bearer/secret header
+    # SMTP email fan-out (any provider). Leave host empty to disable email.
+    alert_email_to: str | None = None       # comma-separated recipients
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    smtp_from: str | None = None
+    smtp_starttls: bool = True
+
+    # --- Dashboard ---
+    # Optional shared-secret gate for the Streamlit dashboard (internal use).
+    # Leave empty for no gate (rely on VPN/network isolation instead).
+    dashboard_password: str | None = None
+
     # --- Behaviour ---
     timezone: str = "Europe/Rome"
     demo_mode: bool = True
@@ -57,6 +84,20 @@ class Settings(BaseSettings):
     @property
     def has_gme(self) -> bool:
         return bool(self.gme_api_username and self.gme_api_password)
+
+    @property
+    def has_webhook(self) -> bool:
+        return bool(self.alert_webhook_url)
+
+    @property
+    def has_email(self) -> bool:
+        return bool(self.smtp_host and self.alert_email_to)
+
+    @property
+    def email_recipients(self) -> list[str]:
+        if not self.alert_email_to:
+            return []
+        return [addr.strip() for addr in self.alert_email_to.split(",") if addr.strip()]
 
     def ensure_dirs(self) -> None:
         """Create runtime data directories if missing."""

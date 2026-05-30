@@ -201,3 +201,35 @@ def test_alerts_trigger_and_clear(tmp_db):
         miss = evaluate_alerts(s, [miss_rule])
     assert len(hit) == 1 and hit[0]["worst_value"] == 80.0
     assert miss == []
+
+
+# --- Notifications ----------------------------------------------------------
+def test_dispatch_stub_and_payload_is_json_serializable():
+    """With no channel configured, dispatch is a stub but builds a clean payload."""
+    import datetime as dt
+    import json
+
+    from energy_prices.notifications import _json_default, build_payload, dispatch_alerts
+
+    alerts = [{
+        "rule": "PUN q0.9 above 200", "market": "elec_dayahead", "zone": "PUN",
+        "worst_value": 250.0, "worst_target": dt.datetime(2026, 5, 31, 19, tzinfo=dt.UTC),
+        "n_crossings": 3, "run_at": dt.datetime(2026, 5, 30, tzinfo=dt.UTC),
+        "raised_at": dt.datetime(2026, 5, 30, 12, tzinfo=dt.UTC),
+    }]
+    payload = build_payload(alerts)
+    assert payload["n_alerts"] == 1
+    # Datetimes must round-trip through JSON without error.
+    s = json.dumps(payload, default=_json_default)
+    assert "2026-05-31" in s
+
+    result = dispatch_alerts(alerts)  # no webhook/SMTP env -> stub
+    assert result["skipped"] is True
+    assert result["delivered"] == 0
+
+
+def test_dispatch_empty_is_noop():
+    from energy_prices.notifications import dispatch_alerts
+
+    result = dispatch_alerts([])
+    assert result["delivered"] == 0 and result["skipped"] is False

@@ -70,13 +70,52 @@ energy forecast --market elec
 energy forecast --market gas
 ```
 
-## Produzione locale con Docker (Postgres + Timescale)
+## Deploy condiviso per i colleghi (Postgres + Timescale, solo locale)
+
+Passaggio dal file SQLite (dev) al system-of-record **Postgres+TimescaleDB**,
+condiviso in rete interna. **Nessun deploy cloud** — sharing via VPN.
 
 ```powershell
-Copy-Item .env.example .env     # compila i secret
-docker compose up -d --build    # db + scheduler ingestione + dashboard
-# dashboard su http://localhost:8501 ; lo scheduler fa il fetch giornaliero ~13:30 CET
+# 1. Config: compila i secret e cambia le password di default
+Copy-Item .env.example .env
+#   in .env: POSTGRES_PASSWORD=<forte>, ENERGY_DASHBOARD_PASSWORD=<condivisa>,
+#            ENERGY_DEMO_MODE=false
+
+# 2. Avvia lo stack (db Timescale + scheduler ingest + dashboard)
+docker compose up -d --build
+
+# 3. (Una tantum) migra lo storico SQLite -> Postgres
+pip install -e ".[postgres]"
+python scripts/migrate_sqlite_to_postgres.py `
+    --source sqlite:///./data/energy_prices.db `
+    --dest postgresql+psycopg2://energy:<password>@localhost:5432/energy
 ```
+
+- **DB non esposto in LAN:** la porta Postgres è vincolata a `127.0.0.1`. I
+  colleghi accedono solo alla **dashboard**, non al database.
+- **Auth dashboard:** `ENERGY_DASHBOARD_PASSWORD` attiva un gate a password
+  condivisa (difesa in profondità; per auth per-utente usare Streamlit OIDC).
+- **VPN (sharing):** esponi la dashboard ai colleghi via **Tailscale** (rete
+  privata, zero-config) — es. `tailscale up` sulla macchina host e condividi
+  l'IP `100.x.y.z:8501`. Niente porte aperte su Internet, niente cloud.
+- Lo scheduler fa il ciclo giornaliero **ingest + forecast + alert** ~13:30 CET
+  (orario configurabile via `ENERGY_SCHEDULER_*`).
+
+## Alert prezzo → canale reale
+
+Le regole di alert (`energy alerts`) possono essere **consegnate** a un canale:
+
+```powershell
+energy alerts --notify            # valuta + invia ai canali configurati
+energy scheduler --once           # giro a vuoto: ingest+forecast+alert una volta
+```
+
+- **Webhook n8n (consigliato):** imposta `ENERGY_ALERT_WEBHOOK_URL` (cloud o
+  self-hosted). Gli alert vengono inviati come JSON; n8n fa il fan-out
+  (email/Slack/Telegram). Senza canale configurato gira in **stub** (logga il
+  payload che verrebbe inviato).
+- **Email SMTP diretta:** in alternativa imposta `ENERGY_SMTP_*` +
+  `ENERGY_ALERT_EMAIL_TO`.
 
 ## Struttura del progetto
 

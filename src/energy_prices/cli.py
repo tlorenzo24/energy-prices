@@ -228,11 +228,36 @@ def dashboard(
 
 @app.command()
 def scheduler(
-    run_now: bool = typer.Option(True, help="Run the ingest+forecast job once at startup."),
+    once: bool = typer.Option(
+        False, "--once", help="Run a single ingest+forecast+alert cycle and exit (dry run)."
+    ),
+    run_now: bool = typer.Option(True, help="Run the job once at startup before scheduling."),
+    notify: bool = typer.Option(
+        True, "--notify/--no-notify", help="Deliver triggered alerts to configured channels."
+    ),
 ) -> None:
-    """Start the blocking daily ingest + forecast scheduler (13:30 Europe/Rome)."""
+    """Start the blocking daily ingest + forecast scheduler (13:30 Europe/Rome).
+
+    Use ``--once`` to run a single full cycle and exit (a 'giro a vuoto' to
+    validate the pipeline) instead of starting the blocking loop.
+    """
     _setup_logging()
-    from energy_prices.ingestion.scheduler import start_scheduler
+    from energy_prices.ingestion.scheduler import run_once, start_scheduler
+
+    if once:
+        summary = run_once(notify=notify)
+        console.print("[green]Ciclo completato[/] (dry run).")
+        table = Table(title="daily_job — riepilogo")
+        table.add_column("Fase")
+        table.add_column("Risultato", justify="right")
+        ing = summary.get("ingested", {})
+        table.add_row("Ingest (righe)", f"{sum(ing.values()):,}" if ing else "0")
+        table.add_row("Forecast (righe)", f"{summary.get('forecast_rows', 0):,}")
+        table.add_row("Alert attivi", str(summary.get("alerts_triggered", 0)))
+        disp = summary.get("dispatch") or {}
+        table.add_row("Alert consegnati", str(disp.get("delivered", 0)))
+        console.print(table)
+        return
 
     start_scheduler(run_now=run_now)
 
@@ -272,7 +297,12 @@ def backfill(
     start: str = typer.Option(..., "--from", help="Start date YYYY-MM-DD (e.g. 2015-01-01)."),
     end: str | None = typer.Option(None, "--to", help="End date YYYY-MM-DD (default: today)."),
     source: str = typer.Option("all", help="all | entsoe | gme | ttf | gie | weather"),
-    chunk_days: int = typer.Option(180, help="Days per request chunk."),
+    chunk_days: int | None = typer.Option(
+        None, help="Days per request chunk (default: source-aware; small for GME)."
+    ),
+    skip_gas: bool = typer.Option(
+        False, "--skip-gas", help="Skip the GME gas sub-request (halves GME calls)."
+    ),
 ) -> None:
     """Historical backfill in bounded chunks (respects API query/quotas limits)."""
     _setup_logging()
@@ -281,7 +311,11 @@ def backfill(
 
     init_db()
     totals = run_backfill(
-        source=source, start=_parse_date(start), end=_parse_date(end), chunk_days=chunk_days
+        source=source,
+        start=_parse_date(start),
+        end=_parse_date(end),
+        chunk_days=chunk_days,
+        skip_gas=skip_gas,
     )
     table = Table(title="Backfill results")
     table.add_column("Source")
@@ -292,8 +326,17 @@ def backfill(
 
 
 @app.command()
-def alerts() -> None:
-    """Evaluate the default price-alert rules against the latest forecasts."""
+def alerts(
+    notify: bool = typer.Option(
+        False, "--notify", help="Deliver triggered alerts to configured channels (webhook/email)."
+    ),
+) -> None:
+    """Evaluate the default price-alert rules against the latest forecasts.
+
+    With ``--notify`` the triggered alerts are also dispatched to the configured
+    webhook (n8n) and/or SMTP email. With no channel configured, the payload
+    that WOULD be sent is logged (stub mode).
+    """
     _setup_logging()
     from energy_prices.alerts import evaluate_alerts
     from energy_prices.storage.db import session_scope
@@ -312,6 +355,19 @@ def alerts() -> None:
         when = a["worst_target"].strftime("%Y-%m-%d %H:%M") if a.get("worst_target") else "—"
         table.add_row(a["rule"], f"{a['worst_value']:.1f} €/MWh", when, str(a["n_crossings"]))
     console.print(table)
+
+    if notify:
+        from energy_prices.notifications import dispatch_alerts
+
+        result = dispatch_alerts(triggered)
+        if result.get("skipped"):
+            console.print(
+                "[yellow]Nessun canale configurato[/] — payload stub loggato. "
+                "Imposta ENERGY_ALERT_WEBHOOK_URL (n8n) o ENERGY_SMTP_* in .env."
+            )
+        else:
+            chans = ", ".join(f"{k}={'ok' if v else 'FAIL'}" for k, v in result["channels"].items())
+            console.print(f"[green]Consegnati {result['delivered']} alert[/] ({chans}).")
 
 
 if __name__ == "__main__":  # pragma: no cover
