@@ -74,13 +74,19 @@ _ZONE_ALIASES: dict[str, str] = {
     "SICI": Zone.SICI.value, "SICILIA": Zone.SICI.value, "SICILY": Zone.SICI.value,
     "SARD": Zone.SARD.value, "SARDEGNA": Zone.SARD.value, "SARDINIA": Zone.SARD.value,
 }
-# Codes that denote the national PUN index rather than a physical zone.
-_PUN_ALIASES = {"PUN", "ITALIA", "IT", "ITALY", "NAT", "NATIONAL", "PREZZOUNICO"}
+# The PUN Index zone code. Validated against the live API (2026-05-30): GME
+# returns "PUN" for the index and a separate "NAT" series — do NOT alias NAT to
+# PUN or the two collide on the same (market, zone, delivery_start) key.
+_PUN_ALIASES = {"PUN", "PREZZOUNICO"}
 
 # Candidate field-name aliases (matched case-insensitively, no separators).
+# NB (validated against the live API 2026-05-30): GME returns Hour=1..24/25 and
+# Period=1..4 as the 15-minute sub-index. "period"/"periodo" therefore belong to
+# the QUARTER keys, NOT the hour keys, or the four quarter-hours of an hour all
+# collapse onto the same timestamp.
 _DATE_KEYS = ("flowdate", "date", "data", "gmedate", "deliverydate", "giorno")
-_HOUR_KEYS = ("hour", "ora", "ore", "period", "periodo")
-_QUARTER_KEYS = ("quarter", "interval", "subhour", "subperiod", "qh", "quartodora")
+_HOUR_KEYS = ("hour", "ora", "ore")
+_QUARTER_KEYS = ("period", "periodo", "quarter", "interval", "subhour", "subperiod", "qh", "quartodora")
 _ZONE_KEYS = ("zone", "zona", "biddingzone", "marketzone", "area")
 _PRICE_KEYS = ("price", "prezzo", "value", "valore", "pun", "pgas", "prezzounico")
 
@@ -143,25 +149,27 @@ def _as_float(raw: Any) -> float | None:
 
 
 def _delivery_start_utc(
-    flow_date: dt.date, hour: int, quarter: int | None
+    flow_date: dt.date, hour: int | None, quarter: int | None
 ) -> tuple[dt.datetime, int]:
-    """Convert (FlowDate, Hour 1..25, Period 1..4|None) to a UTC delivery start.
+    """Convert (FlowDate, Hour, Period) to a UTC delivery start + resolution_minutes.
 
-    Returns ``(utc_datetime, resolution_minutes)``.
-
-    GME numbers hours 1..24 on normal days, 1..23 on the spring short day, and
-    1..25 on the autumn long day (the repeated 02:00-03:00 local hour). We
-    therefore build the local timeline by walking concrete UTC instants from
-    local midnight, which naturally yields 23/24/25 hourly slots per day and
-    resolves the DST fold without ambiguity.
+    Validated against the live GME API (2026-05-30): for 15-minute data the
+    ``Period`` field is the ABSOLUTE quarter-hour index of the local day
+    (1..96, or 1..92/100 on DST short/long days), and ``Hour`` is 1..24/25.
+    So the zero-based slot in the day is ``Period-1`` when present, else
+    ``Hour-1``. We add real minutes to the UTC instant of local midnight, which
+    resolves the spring 23h / autumn 25h DST days without ambiguity.
     """
-    minutes_per_slot = 15 if quarter is not None else 60
-    slots_per_hour = 4 if quarter is not None else 1
-    sub = (quarter - 1) if quarter is not None else 0
-    slot_index = (hour - 1) * slots_per_hour + sub  # zero-based slot in the local day
-    midnight = dt.datetime(flow_date.year, flow_date.month, flow_date.day, tzinfo=_ROME)
-    start_utc = midnight.astimezone(_UTC)
-    return start_utc + dt.timedelta(minutes=minutes_per_slot * slot_index), minutes_per_slot
+    midnight_utc = dt.datetime(
+        flow_date.year, flow_date.month, flow_date.day, tzinfo=_ROME
+    ).astimezone(_UTC)
+    if quarter is not None:
+        minutes_per_slot = 15
+        slot_index = quarter - 1  # Period is the absolute 15-min index of the day
+    else:
+        minutes_per_slot = 60
+        slot_index = (hour or 1) - 1
+    return midnight_utc + dt.timedelta(minutes=minutes_per_slot * slot_index), minutes_per_slot
 
 
 def _quarter_attributes(start: dt.date, end: dt.date) -> dict[str, Any]:

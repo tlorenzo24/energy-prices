@@ -217,6 +217,9 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# ruflo/claude-flow local tooling (disabled for this project via no-op stubs)
+.claude/
+
 # energy-prices: data & model artifacts (never commit GME/market data — licensing)
 data/raw/
 data/processed/
