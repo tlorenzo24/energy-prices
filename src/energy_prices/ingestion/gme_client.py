@@ -236,7 +236,8 @@ class GmeClient:
         """Authenticate and cache a JWT bearer token. Returns the token."""
         if not (self._username and self._password):
             raise GmeError("GME credentials missing (set ENERGY_GME_API_USERNAME/PASSWORD).")
-        payload = {"Username": self._username, "Password": self._password}
+        # NB: the GME Auth endpoint expects the field "Login" (not "Username").
+        payload = {"Login": self._username, "Password": self._password}
         url = f"{self.base_url}/api/v1/Auth"
         headers = {"Content-Type": "application/json"}
         try:

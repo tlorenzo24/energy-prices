@@ -14,6 +14,7 @@ dependencies = [
     "pydantic>=2.6",
     "pydantic-settings>=2.2",
     "requests>=2.31",
+    "truststore>=0.9",  # use OS trust store for TLS (corporate/AV proxies)
     "python-dateutil>=2.9",
     "holidays>=0.45",
     "scikit-learn>=1.4",
