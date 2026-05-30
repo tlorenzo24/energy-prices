@@ -216,3 +216,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# energy-prices: data & model artifacts (never commit GME/market data — licensing)
+data/raw/
+data/processed/
+data/parquet/
+*.sqlite
+*.db
+models/artifacts/
+src/energy_prices/models/artifacts/
+*.joblib
+*.pkl

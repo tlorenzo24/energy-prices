@@ -1,0 +1,48 @@
+# Local/production stack: TimescaleDB + ingestion-scheduler worker + Streamlit dashboard.
+# For zero-setup local dev you can skip this entirely and run on SQLite (see README).
+services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: energy
+      POSTGRES_PASSWORD: energy
+      POSTGRES_DB: energy
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U energy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ingest:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["python", "-m", "energy_prices.ingestion.scheduler"]
+    env_file: .env
+    environment:
+      ENERGY_DATABASE_URL: postgresql+psycopg2://energy:energy@db:5432/energy
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    env_file: .env
+    environment:
+      ENERGY_DATABASE_URL: postgresql+psycopg2://energy:energy@db:5432/energy
+    ports:
+      - "8501:8501"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
