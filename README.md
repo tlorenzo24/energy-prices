@@ -17,14 +17,15 @@ probabilistiche del prezzo futuro.
 ENTSO-E (primario, gratis) ─┐
 GME API (ufficiale, operatore) ─┤
 TTF yfinance / gas fundamentals ─┼─► ingestion ─► PostgreSQL+TimescaleDB ─► forecasting ─► dashboard (Streamlit)
-                                 │                  (system-of-record)        (elec: LEAR+LightGBM  grafici + bande
+                                 │                  (system-of-record)        (elec: LightGBM+CQR   grafici + bande
                                  │                                             gas: PSV=TTF+basis,   di confidenza)
                                  └─ GIE AGSI+ / Open-Meteo (esogene, opz.)     probabilistico, su DB)
 ```
 
 - **Dati**: ENTSO-E è la fonte automatica primaria (gratuita); l'**API GME**
   ufficiale fornisce PUN Index, intraday e gas (richiede credenziali operatore).
-- **Modelli**: elettrico = ensemble **LEAR** + **LightGBM** con quantili; gas (PSV)
+- **Modelli**: elettrico = **LightGBM + CQR** (quantili calibrati conformemente;
+  batte l'ensemble LEAR+LGBM in modo significativo sul punto, DM p=0.0005); gas (PSV)
   = **cointegrazione PSV = TTF + basis** (TTF previsto via SARIMAX, basis AR(1)
   mean-reverting). Forecast probabilistico; metriche rMAE, CRPS, pinball, coverage.
 - **Storage**: Postgres+TimescaleDB in produzione; SQLite a zero-setup in locale.

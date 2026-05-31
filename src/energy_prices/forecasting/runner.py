@@ -302,9 +302,13 @@ def _select_model(market: str) -> Forecaster:
     the caller, which falls back to the seasonal-naive baseline.
     """
     if _is_electricity(market):
-        from energy_prices.models.ensemble import EnsembleForecaster
+        # Day-ahead electricity: LightGBM quantile GBM. On the 242-day backtest it
+        # SIGNIFICANTLY beats the LEAR+LightGBM ensemble on point error (DM p=0.0005);
+        # the runner wraps it in CQR (its raw bands under-cover) for honest,
+        # conservative coverage. See docs/backtest_pun_real.md.
+        from energy_prices.models.lgbm import LightGBMForecaster
 
-        return EnsembleForecaster()
+        return LightGBMForecaster()
     if market == Market.GAS_DAYAHEAD.value:
         # PSV = TTF_forecast + mean-reverting basis (cointegration). Leak-safe (TTF
         # forecast internally). On the current short history it is no worse than the
@@ -458,8 +462,12 @@ def _run_forecasts_with_session(
     if market == Market.GAS_DAYAHEAD.value:
         exog_history = _augment_with_ttf(prices, exog_history, y.index)
 
+    # Electricity is CQR-calibrated by default (raw LightGBM bands under-cover);
+    # gas (psv_basis) and TTF are already well-calibrated, so they only calibrate
+    # when the caller explicitly asks (`calibrate=True`).
+    use_cqr = calibrate or _is_electricity(market)
     result = _fit_predict_with_fallback(
-        market, y, horizon_index, exog_history, exog_future, calibrate
+        market, y, horizon_index, exog_history, exog_future, use_cqr
     )
 
     rows = result.to_rows(

@@ -68,20 +68,16 @@ fallback) adds noise, not skill, at this data volume.
    *under*-covers (0.684), ensemble+CQR is **closest to nominal (0.844)**. The
    46-day finding that the ensemble's *native* bands sit ≈ nominal (≈0.806) **does
    NOT replicate** on the larger, calmer sample.
-3. **⚠️ Production model decision (flagged, not auto-changed).** Production
-   currently emits the **ensemble with CQR off** (`runner._select_model` elec +
-   `calibrate=False`). On 242 days that config is dominated on point (significantly
-   worse than lightgbm) **and** under-covers (0.684). The data now supports:
-   - **point-first / risk-aware:** switch elec to **LightGBM + CQR** — best point
-     and conservative (over-covering, ~0.96) bands, which is the safe failure mode
-     for a trading-risk tool; or
-   - **calibration-first:** **ensemble + CQR** for the closest-to-nominal coverage
-     (0.844), accepting the worse point error.
-
-   This is a genuine point-vs-interval trade-off (no dominant config), so it is
-   **left for an explicit decision** rather than changed autonomously. The gas
-   model (`psv_basis`) was switched because its win was unambiguous; the elec
-   choice is not.
+3. **Production model — DECIDED: LightGBM + CQR.** The prior config (ensemble,
+   CQR off) was dominated on 242 days — significantly worse on point than lightgbm
+   *and* under-covering (0.684). Production now emits **LightGBM wrapped in CQR**
+   for electricity (`runner._select_model` returns `LightGBMForecaster`; the runner
+   forces CQR on for elec). This is the **point-first / risk-aware** choice: best
+   point error (rMAE 0.689) with conservative, over-covering (~0.96) bands — the
+   safe failure mode for a trading-risk tool (never *under*-state risk). Gas
+   (`psv_basis`) keeps CQR off (its native bands are already ≈ nominal). The
+   alternative, *calibration-first* config (ensemble + CQR, coverage 0.844) was
+   not chosen because its point error is significantly worse.
 4. **Deep model (NHITS/TFT) — still DEFERRED.** 242 days remains data-starved for a
    deep net, and the ensemble's extra (linear EPF) member already fails to beat a
    single GBM here. Revisit after the **ENTSO-E multi-year backfill + exogenous
