@@ -1,0 +1,72 @@
+[project]
+name = "energy-prices"
+version = "0.1.0"
+description = "Internal dashboard + forecasting service for GME (Italian) electricity & gas prices"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Energia Capitale" }]
+
+dependencies = [
+    # core. Upper bounds cap the next major where an API/behaviour break is likely
+    # (esp. apscheduler 4.x, sqlalchemy/pydantic majors, and the ML/data libs whose
+    # bumps shift model output) — for reproducible images, pair with a lockfile.
+    "pandas>=2.1,<4",
+    "numpy>=1.26,<2.1",
+    "sqlalchemy>=2.0,<3",
+    "pydantic>=2.6,<3",
+    "pydantic-settings>=2.2,<3",
+    "requests>=2.31,<3",
+    "truststore>=0.9",  # use OS trust store for TLS (corporate/AV proxies)
+    "python-dateutil>=2.9",
+    "holidays>=0.45",
+    "scikit-learn>=1.4,<2",
+    "typer>=0.12",
+    "rich>=13.7",
+    "apscheduler>=3.10,<4",
+    "tenacity>=8.2",
+    # ingestion
+    "entsoe-py>=0.8.0",
+    "yfinance>=0.2.40",
+    "lxml>=5.1",
+    # models
+    "lightgbm>=4.3,<5",
+    "statsmodels>=0.14,<0.15",
+    # dashboard
+    "streamlit>=1.42,<2",
+    "plotly>=5.20,<7",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg2-binary>=2.9"]
+lear = ["epftoolbox>=1.0"]          # heavy (pulls TensorFlow) — optional Tier-1 model
+garch = ["arch>=6.3"]               # GARCH volatility for gas (optional)
+dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.4", "mypy>=1.10"]
+
+[project.scripts]
+energy = "energy_prices.cli:app"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# E501: line length handled by formatter. B905: zip(strict=) noise where equal
+# lengths are guaranteed. UP042: enums are stored as DB strings, (str, Enum) is
+# the intentional, safe form. UP007: keep explicit typing.Union where used.
+ignore = ["E501", "B905", "UP042", "UP007"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true

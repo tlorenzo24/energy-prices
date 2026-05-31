@@ -216,3 +216,23 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ruflo/claude-flow local tooling (disabled for this project via no-op stubs)
+.claude/
+
+# energy-prices: data & model artifacts (never commit GME/market data — licensing)
+data/raw/
+data/processed/
+data/parquet/
+*.sqlite
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/ca-bundle.pem
+scripts/*.out
+scripts/*.err
+models/artifacts/
+src/energy_prices/models/artifacts/
+*.joblib
+*.pkl

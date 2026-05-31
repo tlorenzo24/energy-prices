@@ -1,0 +1,23 @@
+# Keep the build context small and prevent secrets/data from ever entering an image.
+.env
+.env.*
+!.env.example
+.venv/
+data/
+*.db
+*.sqlite
+*.sqlite3
+.git/
+.gitignore
+.github/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+__pycache__/
+*.pyc
+notebooks/
+docs/
+tests/
+scripts/
+*.md
+!README.md
