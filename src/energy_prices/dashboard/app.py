@@ -18,6 +18,7 @@ tz-aware; prices are EUR/MWh.
 from __future__ import annotations
 
 import datetime as dt
+import hmac
 import logging
 from typing import Any
 
@@ -398,21 +399,23 @@ def _sidebar(tz: str) -> dict[str, Any]:
 
     today = dt.datetime.now(dt.UTC).date()
     default_start = today - dt.timedelta(days=30)
-    date_range = st.sidebar.date_input(
+    # st.date_input returns a single date or a (start, end) tuple depending on
+    # how much of the range the user has picked; normalise to (start_d, end_d).
+    date_range: Any = st.sidebar.date_input(
         "Intervallo date",
         value=(default_start, today),
         max_value=today + dt.timedelta(days=7),
     )
-    if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
-        start_d, end_d = date_range
+    if isinstance(date_range, (tuple, list)):
+        seq = list(date_range)
+        start_d = seq[0]
+        end_d = seq[1] if len(seq) > 1 else seq[0]
     else:  # single date selected so far
-        start_d = end_d = (
-            date_range[0] if isinstance(date_range, (tuple, list)) else date_range
-        )
+        start_d = end_d = date_range
 
     # Model selector (only meaningful where forecasts exist).
     model_names = list_model_names(market.value, zone)
-    model_choice = "auto"
+    model_choice: str | None = "auto"
     if model_names:
         options = ["auto (ultimo run)"] + model_names
         chosen = st.sidebar.selectbox("Modello previsione", options, index=0)
@@ -449,7 +452,7 @@ def _require_password(settings) -> bool:
     pwd = st.text_input("Password", type="password")
     if not pwd:
         st.stop()
-    if pwd == settings.dashboard_password:
+    if hmac.compare_digest(pwd, settings.dashboard_password):
         st.session_state["_authed"] = True
         st.rerun()
     st.error("Password errata.")

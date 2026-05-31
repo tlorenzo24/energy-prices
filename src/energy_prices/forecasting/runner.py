@@ -199,6 +199,7 @@ def _load_exog_frame(
     omitted, so the frame degrades to whatever data has been ingested.
     """
     columns: dict[str, pd.Series] = {}
+    missing: list[str] = []
     elec = _is_electricity(market)
     for name in _exog_series_names(market):
         lookup_zone = zone if elec else None
@@ -208,6 +209,16 @@ def _load_exog_frame(
             s = exog_repo.get_series(name, zone=None, start=start, end=end)
         if s is not None and not s.empty:
             columns[name] = s.astype(float)
+        else:
+            missing.append(name)
+    if missing:
+        # Surface the silent degradation: a requested driver had no rows, so the
+        # forecast runs without it (e.g. ENTSO-E load/RES never ingested).
+        logger.warning(
+            "market=%s zone=%s: exog series %s returned no data — forecasting WITHOUT them. "
+            "Ingest the driver (e.g. ENTSO-E load/wind+solar, GIE gas storage) to enable it.",
+            market, zone, missing,
+        )
     if not columns:
         return pd.DataFrame()
     frame = pd.concat(columns, axis=1)
@@ -252,6 +263,33 @@ def _split_exog(
     return exog_history, exog_future
 
 
+def _augment_with_ttf(
+    prices: PriceRepository,
+    exog_history: pd.DataFrame | None,
+    history_index: pd.DatetimeIndex,
+) -> pd.DataFrame | None:
+    """Add the TTF benchmark price history as a ``ttf`` exog column for gas.
+
+    Returns ``exog_history`` with a ``ttf`` column aligned to ``history_index``
+    (forward/back-filled across the benchmark's non-trading days), or the input
+    unchanged when no TTF history is available.
+    """
+    if history_index is None or len(history_index) == 0:
+        return exog_history
+    df = prices.get_prices(Market.TTF.value)
+    if df.empty or "price" not in df.columns:
+        return exog_history
+    ttf = df["price"].astype(float)
+    ttf.index = pd.DatetimeIndex(ttf.index)
+    ttf = ttf[~ttf.index.duplicated(keep="last")].sort_index()
+    ttf_aligned = ttf.reindex(history_index).ffill().bfill()
+    if ttf_aligned.dropna().empty:
+        return exog_history
+    if exog_history is None:
+        return ttf_aligned.to_frame("ttf")
+    return exog_history.assign(ttf=ttf_aligned)
+
+
 # ---------------------------------------------------------------------------
 # Model selection
 # ---------------------------------------------------------------------------
@@ -268,9 +306,14 @@ def _select_model(market: str) -> Forecaster:
 
         return EnsembleForecaster()
     if market == Market.GAS_DAYAHEAD.value:
-        from energy_prices.models.ensemble import EnsembleForecaster
+        # PSV = TTF_forecast + mean-reverting basis (cointegration). Leak-safe (TTF
+        # forecast internally). On the current short history it is no worse than the
+        # PSV-only SARIMAX on point error (rMAE 0.41 vs 0.46 day-ahead; DM not yet
+        # significant) with better-calibrated intervals, and is structurally
+        # preferred — see docs/backtest_gas_psv.md.
+        from energy_prices.models.psv_basis import PsvBasisForecaster
 
-        return EnsembleForecaster.for_gas()
+        return PsvBasisForecaster()
     # TTF and any other daily benchmark.
     from energy_prices.models.gas_sarimax import SarimaxForecaster
 
@@ -408,6 +451,12 @@ def _run_forecasts_with_session(
     exog_history, exog_future = _split_exog(
         exog_repo, market, zone, y.index, horizon_index, run_at
     )
+
+    # Gas: inject the TTF benchmark history as the 'ttf' driver for PsvBasisForecaster.
+    # History only — the model forecasts TTF internally (the realised future TTF is
+    # not known at the day-ahead gate), so we never place future TTF on the horizon.
+    if market == Market.GAS_DAYAHEAD.value:
+        exog_history = _augment_with_ttf(prices, exog_history, y.index)
 
     result = _fit_predict_with_fallback(
         market, y, horizon_index, exog_history, exog_future, calibrate

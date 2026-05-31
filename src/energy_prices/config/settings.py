@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     timezone: str = "Europe/Rome"
     demo_mode: bool = True
     log_level: str = "INFO"
+    # Open-Meteo weather ingestion. OFF by default: the free tier is
+    # non-commercial-use only, so a commercial deploy must either set this true
+    # under a paid/self-hosted Open-Meteo plan or leave it off.
+    enable_weather: bool = False
 
     @property
     def is_postgres(self) -> bool:

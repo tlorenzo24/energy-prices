@@ -9,7 +9,7 @@ import sys as _sys
 
 for _stream in (_sys.stdout, _sys.stderr):
     try:  # pragma: no cover - environment-dependent
-        _stream.reconfigure(encoding="utf-8")
+        _stream.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
     except Exception:  # noqa: BLE001 - older/odd streams lack reconfigure
         pass
 

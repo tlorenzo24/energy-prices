@@ -94,7 +94,7 @@ class GieClient:
     )
     def _get_page(self, start: dt.date, end: dt.date, page: int) -> dict[str, Any]:
         """Fetch a single page of the Italy storage series."""
-        params = {
+        params: dict[str, Any] = {
             "country": COUNTRY_CODE,
             "from": start.isoformat(),
             "to": end.isoformat(),

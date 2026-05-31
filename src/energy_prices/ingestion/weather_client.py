@@ -27,6 +27,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 import requests
 from sqlalchemy.orm import Session
@@ -84,7 +85,7 @@ def _fetch_city_daily_mean(
 
     Returns an empty dict if the API yields no usable data for the window.
     """
-    params = {
+    params: dict[str, Any] = {
         "latitude": city.latitude,
         "longitude": city.longitude,
         "start_date": start.isoformat(),

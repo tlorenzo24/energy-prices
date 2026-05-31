@@ -137,8 +137,14 @@ def test_seed_then_forecast_roundtrip(tmp_db):
     assert 0.0 < fc["q0.5"].median() < 400.0
 
 
-def test_gas_forecast_uses_ensemble(tmp_db):
-    """Regression: gas ensemble must load SarimaxForecaster from gas_sarimax."""
+def test_gas_forecast_uses_psv_basis(tmp_db):
+    """Regression: gas runs the PSV=TTF+basis model, NOT the seasonal-naive fallback.
+
+    The demo seeds a cointegrated TTF, so PsvBasisForecaster's TTF path is active.
+    Asserting on the persisted model_name is what makes this a real regression: the
+    runner's broad except falls back to seasonal-naive, which also yields non-empty
+    output, so `not fc.empty` alone could never catch the model failing to load.
+    """
     from energy_prices.config import Market
     from energy_prices.forecasting.runner import run_forecasts
     from energy_prices.ingestion.demo import seed_demo
@@ -150,9 +156,11 @@ def test_gas_forecast_uses_ensemble(tmp_db):
     saved = run_forecasts(Market.GAS_DAYAHEAD.value)
     assert saved > 0
     with session_scope() as s:
-        run_at = ForecastRepository(s).latest_run_at(Market.GAS_DAYAHEAD.value)
-        fc = ForecastRepository(s).get_forecasts(Market.GAS_DAYAHEAD.value, run_at=run_at)
-    assert not fc.empty
+        repo = ForecastRepository(s)
+        assert repo.latest_run_at(Market.GAS_DAYAHEAD.value, model_name="psv_basis") is not None
+        assert repo.latest_run_at(Market.GAS_DAYAHEAD.value, model_name="seasonal_naive") is None
+        fc = repo.get_forecasts(Market.GAS_DAYAHEAD.value)
+    assert not fc.empty and "q0.5" in fc.columns
 
 
 # --- Calibration (CQR) ------------------------------------------------------

@@ -19,6 +19,7 @@ Quantiles are sorted per row so the emitted quantiles never cross.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -59,7 +60,7 @@ class LightGBMForecaster(Forecaster):
         self.tz = tz
         self.lag_hours = tuple(lag_hours)
         self.roll_windows = tuple(roll_windows)
-        self._params: dict[str, object] = {
+        self._params: dict[str, Any] = {
             "objective": "quantile",
             "n_estimators": n_estimators,
             "learning_rate": learning_rate,

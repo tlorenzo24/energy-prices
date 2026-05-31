@@ -53,7 +53,13 @@ _BACKFILL_CHUNK_PAUSE_S: dict[str, float] = {
 
 def _resolve_sources(source: str) -> list[str]:
     if source == "all":
-        return list(ALL_SOURCES)
+        # Weather (Open-Meteo) is opt-in: its free tier is non-commercial-use
+        # only, so it is excluded from "all" unless explicitly enabled. An
+        # explicit `source="weather"` still honours the request.
+        sources = list(ALL_SOURCES)
+        if not get_settings().enable_weather and "weather" in sources:
+            sources.remove("weather")
+        return sources
     if source not in SOURCE_MODULES:
         raise ValueError(
             f"unknown source {source!r}; choose from: all, {', '.join(ALL_SOURCES)}"
@@ -196,6 +202,29 @@ def run_once(notify: bool = True) -> dict:
     return daily_job(notify=notify)
 
 
+def _bootstrap_if_empty() -> None:
+    """Seed demo data on first boot when the DB is empty and demo_mode is on.
+
+    Keeps a fresh Postgres/Docker deploy's dashboard from being blank before the
+    first real ingest completes. No-op when data already exists or demo_mode is
+    off (a credentialed prod deploy fills the DB via the run-on-start daily job).
+    """
+    settings = get_settings()
+    if not settings.demo_mode:
+        return
+    from energy_prices.config import Market, Zone
+    from energy_prices.ingestion.demo import seed_demo
+    from energy_prices.storage.repositories import PriceRepository
+
+    with session_scope() as session:
+        if PriceRepository(session).latest_delivery(
+            Market.ELEC_DAYAHEAD.value, zone=Zone.PUN.value
+        ) is not None:
+            return  # already has data
+        rows = seed_demo(session)
+        logger.info("Bootstrap: DB empty + demo_mode on -> seeded %d demo rows.", rows)
+
+
 def start_scheduler(run_now: bool | None = None) -> None:
     """Start a blocking scheduler with the configured daily Europe/Rome job.
 
@@ -209,6 +238,7 @@ def start_scheduler(run_now: bool | None = None) -> None:
 
     settings = get_settings()
     init_db()
+    _bootstrap_if_empty()
 
     if run_now is None:
         run_now = settings.scheduler_run_on_start

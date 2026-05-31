@@ -107,6 +107,9 @@ def _post_webhook(payload: dict, settings: Settings) -> bool:
 
 def _send_email(payload: dict, settings: Settings) -> bool:
     """Send the alerts as a plain-text email via SMTP. Returns success."""
+    if not settings.smtp_host:
+        logger.warning("Email dispatch requested but ENERGY_SMTP_HOST is unset; skipping.")
+        return False
     recipients = settings.email_recipients
     sender = settings.smtp_from or settings.smtp_user or "energy-prices@localhost"
     msg = EmailMessage()

@@ -5,7 +5,7 @@ services:
     image: timescale/timescaledb:latest-pg16
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-energy}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-energy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — no default, pick a strong one}
       POSTGRES_DB: ${POSTGRES_DB:-energy}
     # Bind to loopback only: the DB is never exposed on the LAN. Colleagues reach
     # the dashboard over the VPN (Tailscale), not the raw Postgres port.
@@ -26,7 +26,7 @@ services:
     command: ["python", "-m", "energy_prices.ingestion.scheduler"]
     env_file: .env
     environment:
-      ENERGY_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-energy}:${POSTGRES_PASSWORD:-energy}@db:5432/${POSTGRES_DB:-energy}
+      ENERGY_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-energy}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — no default, pick a strong one}@db:5432/${POSTGRES_DB:-energy}
     depends_on:
       db:
         condition: service_healthy
@@ -40,11 +40,13 @@ services:
               "--server.port", "8501", "--server.address", "0.0.0.0"]
     env_file: .env
     environment:
-      ENERGY_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-energy}:${POSTGRES_PASSWORD:-energy}@db:5432/${POSTGRES_DB:-energy}
-    # Exposed on all interfaces so the VPN (Tailscale) can reach it; the
-    # ENERGY_DASHBOARD_PASSWORD gate in .env provides a shared-secret check.
+      ENERGY_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-energy}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — no default, pick a strong one}@db:5432/${POSTGRES_DB:-energy}
+    # Bind to loopback on the host: reach it over the VPN (Tailscale) interface,
+    # not the raw LAN. The container still listens on 0.0.0.0 internally; the
+    # ENERGY_DASHBOARD_PASSWORD gate in .env adds a shared-secret check. To expose
+    # on a specific VPN IP instead, change to "<tailscale-ip>:8501:8501".
     ports:
-      - "8501:8501"
+      - "127.0.0.1:8501:8501"
     depends_on:
       db:
         condition: service_healthy

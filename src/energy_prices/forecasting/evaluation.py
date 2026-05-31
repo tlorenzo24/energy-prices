@@ -58,7 +58,8 @@ def _align(*arrays: ArrayLike) -> list[np.ndarray]:
         and all(s.index.is_unique for s in series)
     )
     if joinable:
-        cols = [x.rename(i) for i, x in enumerate(arrays)]
+        # `joinable` guarantees every element is a pd.Series; mypy can't narrow it.
+        cols = [x.rename(i) for i, x in enumerate(arrays)]  # type: ignore[union-attr]
         joined = pd.concat(cols, axis=1, join="inner")
         out = [joined[i].to_numpy(dtype="float64") for i in range(len(arrays))]
     else:
@@ -234,7 +235,7 @@ def crps_from_quantiles(y_true: ArrayLike, quantiles_df: pd.DataFrame) -> float:
     # CRPS = 2 * int_0^1 pinball(q) dq ; trapezoid on the available grid (no
     # extrapolation beyond [min level, max level]). Prefer np.trapezoid (numpy>=2)
     # and fall back to the legacy np.trapz name on older numpy.
-    trapezoid = getattr(np, "trapezoid", None) or np.trapz
+    trapezoid = getattr(np, "trapezoid", None) or np.trapz  # type: ignore[attr-defined]
     integral = float(trapezoid(pb, lv))
     return float(2.0 * integral)
 

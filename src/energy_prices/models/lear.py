@@ -323,7 +323,7 @@ class LearForecaster(Forecaster):
         as a day-ahead model would once D-1 prices are known.
         """
         assert self._model is not None and self._scaler is not None
-        assert self._feature_cols is not None
+        assert self._feature_cols is not None and self._y is not None
 
         history = self._y.copy()
         exog_all = self._combine_exog(exog_future)

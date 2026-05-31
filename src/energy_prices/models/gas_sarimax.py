@@ -88,10 +88,12 @@ class SarimaxForecaster(Forecaster):
 
         # Populated by fit().
         self._result = None  # statsmodels SARIMAXResultsWrapper
-        self._fitted_order: tuple[int, int, int] = self.order
+        self._fitted_order: tuple[int, ...] = self.order
         self._log_applied: bool = False
         self._freq: str = "D"
         self._exog_cols: list[str] = []
+        # Last in-sample exog row, broadcast forward when the horizon lacks exog.
+        self._last_exog_row: pd.Series | None = None
         # Extra residual-vol multiplier from GARCH (1.0 == no widening).
         self._garch_scale: float = 1.0
 
@@ -106,6 +108,10 @@ class SarimaxForecaster(Forecaster):
         y_model = np.log(y) if self._log_applied else y.astype(float)
 
         exog_model = self._prepare_exog(exog, y_model.index, fitting=True)
+        # Remember the last observed exog row so predict() can carry it forward
+        # (a far more neutral default than zero for level regressors like hdd).
+        if exog_model is not None and not exog_model.empty:
+            self._last_exog_row = exog_model.iloc[-1].copy()
 
         result = self._fit_with_fallback(y_model, exog_model)
         self._result = result
@@ -160,7 +166,7 @@ class SarimaxForecaster(Forecaster):
         """Try the configured order, then progressively simpler ones."""
         from statsmodels.tsa.statespace.sarimax import SARIMAX
 
-        orders: list[tuple[int, int, int]] = [self.order]
+        orders: list[tuple[int, ...]] = [self.order]
         for fb in _FALLBACK_ORDERS:
             if fb not in orders:
                 orders.append(fb)
@@ -308,11 +314,20 @@ class SarimaxForecaster(Forecaster):
                 return None  # model fit without exog -> forecast without exog
 
         if exog is None or exog.empty:
-            # Model needs exog but none supplied for the horizon: forward-fill the
-            # last known values as a neutral best-effort, then zero-fill.
-            aligned = pd.DataFrame(
-                0.0, index=target_index, columns=self._exog_cols, dtype=float
-            )
+            # Model needs exog but none supplied for the horizon: broadcast the
+            # last in-sample exog row forward (a neutral default near the data's
+            # own level), falling back to zero only if we never saw one.
+            if self._last_exog_row is not None:
+                row = self._last_exog_row.reindex(self._exog_cols).fillna(0.0)
+                aligned = pd.DataFrame(
+                    [row.to_numpy(dtype=float)] * len(target_index),
+                    index=target_index,
+                    columns=self._exog_cols,
+                )
+            else:
+                aligned = pd.DataFrame(
+                    0.0, index=target_index, columns=self._exog_cols, dtype=float
+                )
             return aligned
 
         ex = exog.copy()

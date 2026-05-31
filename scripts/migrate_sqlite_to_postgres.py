@@ -111,11 +111,23 @@ def main() -> None:
     )
     parser.add_argument(
         "--dest",
-        default="postgresql+psycopg2://energy:energy@localhost:5432/energy",
-        help="Destination Postgres URL.",
+        default=None,
+        help="Destination Postgres URL. Defaults to ENERGY_DATABASE_URL when that "
+        "is a Postgres URL (no embedded credentials in this script).",
     )
     args = parser.parse_args()
-    migrate(args.source, args.dest)
+    dest = args.dest
+    if not dest:
+        from energy_prices.config import get_settings
+
+        url = get_settings().database_url
+        if not url.startswith("postgresql"):
+            parser.error(
+                "No --dest given and ENERGY_DATABASE_URL is not a Postgres URL. "
+                "Pass --dest postgresql+psycopg2://user:pass@host:5432/db"
+            )
+        dest = url
+    migrate(args.source, dest)
 
 
 if __name__ == "__main__":

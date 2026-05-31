@@ -17,15 +17,16 @@ probabilistiche del prezzo futuro.
 ENTSO-E (primario, gratis) ─┐
 GME API (ufficiale, operatore) ─┤
 TTF yfinance / gas fundamentals ─┼─► ingestion ─► PostgreSQL+TimescaleDB ─► forecasting ─► dashboard (Streamlit)
-                                 │                  (system-of-record)        (LEAR+LightGBM,    grafici + bande
-                                 │                                             probabilistico,    di confidenza)
-                                 └─ AGSI+ / ENTSOG (feature esogene)           pre-calcolato su DB)
+                                 │                  (system-of-record)        (elec: LEAR+LightGBM  grafici + bande
+                                 │                                             gas: PSV=TTF+basis,   di confidenza)
+                                 └─ GIE AGSI+ / Open-Meteo (esogene, opz.)     probabilistico, su DB)
 ```
 
 - **Dati**: ENTSO-E è la fonte automatica primaria (gratuita); l'**API GME**
   ufficiale fornisce PUN Index, intraday e gas (richiede credenziali operatore).
-- **Modelli**: ensemble robusto **LEAR** (`epftoolbox`) + **LightGBM** con quantili
-  (forecast probabilistico). Metriche: rMAE, CRPS, pinball, coverage.
+- **Modelli**: elettrico = ensemble **LEAR** + **LightGBM** con quantili; gas (PSV)
+  = **cointegrazione PSV = TTF + basis** (TTF previsto via SARIMAX, basis AR(1)
+  mean-reverting). Forecast probabilistico; metriche rMAE, CRPS, pinball, coverage.
 - **Storage**: Postgres+TimescaleDB in produzione; SQLite a zero-setup in locale.
 - **Forecast pre-calcolati** su DB: la dashboard fa solo `SELECT` (veloce, uguale
   per tutti, backtest gratuito su ogni run archiviata).
@@ -84,12 +85,16 @@ Copy-Item .env.example .env
 # 2. Avvia lo stack (db Timescale + scheduler ingest + dashboard)
 docker compose up -d --build
 
-# 3. (Una tantum) migra lo storico SQLite -> Postgres
+# 3. (Una tantum) migra lo storico SQLite -> Postgres. Senza --dest usa
+#    ENERGY_DATABASE_URL del .env (nessuna password hardcoded nello script).
 pip install -e ".[postgres]"
-python scripts/migrate_sqlite_to_postgres.py `
-    --source sqlite:///./data/energy_prices.db `
-    --dest postgresql+psycopg2://energy:<password>@localhost:5432/energy
+python scripts/migrate_sqlite_to_postgres.py --source sqlite:///./data/energy_prices.db
 ```
+
+> **Nota primo avvio:** finché la migrazione (o il primo ciclo di `ingest`) non è
+> completata, con `ENERGY_DEMO_MODE=false` la dashboard è **vuota**. Con
+> `demo_mode=true` lo scheduler semina automaticamente i dati demo al primo avvio
+> se il DB è vuoto, così non resta mai bianca.
 
 - **DB non esposto in LAN:** la porta Postgres è vincolata a `127.0.0.1`. I
   colleghi accedono solo alla **dashboard**, non al database.
@@ -123,13 +128,15 @@ energy scheduler --once           # giro a vuoto: ingest+forecast+alert una volt
 src/energy_prices/
   config/        settings (env) + enums (mercati, zone, codici EIC)
   storage/       db.py, models.py (ORM), repositories.py  ← contratti dati
-  ingestion/     entsoe_client, gme_client, ttf_client, gie_client, entsog_client,
-                 demo.py (dati sintetici), scheduler.py
+  ingestion/     entsoe_client, gme_client, ttf_client, gie_client (storage gas),
+                 weather_client (Open-Meteo, opt-in), demo.py (sintetici), scheduler.py
   features/      calendar.py, build.py (lag/rolling leak-safe)
-  models/        base.py (interfaccia), baseline.py, lear.py, lgbm.py, gas_sarimax.py, ensemble.py
+  models/        base.py (interfaccia), baseline.py, lear.py, lgbm.py, gas_sarimax.py,
+                 psv_basis.py (gas PSV=TTF+basis), ensemble.py, calibration.py (CQR)
   forecasting/   runner.py (batch → tabella forecasts), evaluation.py (rMAE/CRPS/DM)
-  dashboard/     app.py (+ pages/)
-  cli.py         comandi: init-db, seed-demo, ingest, forecast, backtest, dashboard, scheduler
+  alerts.py / notifications.py   regole alert prezzo + consegna (webhook n8n / SMTP)
+  dashboard/     app.py
+  cli.py         comandi: init-db, seed-demo, ingest, backfill, forecast, backtest, dashboard, scheduler
 ```
 
 ## Comandi CLI
@@ -155,8 +162,13 @@ scritto; richiesta l'attribuzione **"Fonte: Gestore dei Mercati Energetici S.p.A
 Per l'uso interno a supporto di decisioni di trading verificare che il contratto
 di partecipazione/operatore lo copra. yfinance (TTF) è un proxy non ufficiale,
 adatto a MVP/sanity-check, non come system-of-record per un prodotto commerciale.
+**Open-Meteo** (meteo/HDD/CDD) è disabilitato di default (`ENERGY_ENABLE_WEATHER=false`):
+il tier gratuito è **solo non-commerciale** — abilitarlo solo con un piano a
+pagamento o un'istanza self-hosted per l'uso commerciale.
 
 ## Stato
 
-MVP in costruzione. Fonti dati e approccio verificati al 2026-05-30 — vedi
-la memoria di progetto `market-data-architecture`.
+MVP. Fonti dati e approccio verificati al 2026-05-30 (vedi memoria di progetto
+`market-data-architecture`). Backtest su dati reali in `docs/backtest_pun_real.md`
+(elettrico) e `docs/backtest_gas_psv.md` (gas). CI: ruff + mypy + pytest +
+validazione TimescaleDB su Postgres (`.github/workflows/ci.yml`).

@@ -78,23 +78,23 @@ def main():
     print(f"price: mean={y.mean():.1f} std={y.std():.1f} "
           f"min={y.min():.1f} max={y.max():.1f}\n", flush=True)
 
-    # 1) Literal CLI horizon (24 periods = 6h ahead on 15-min data).
-    print("[H=24, windows=20]  (literal `energy backtest` default)", flush=True)
-    run("lightgbm", y, lgbm_factory, 24, 20)
-    run("lightgbm+cqr (cf=0.2)", y, cqr(lgbm_factory), 24, 20)
+    # 1) Intraday reference: 24 periods = 6h ahead on 15-min data.
+    print("[H=24, windows=48]  (6h-ahead intraday reference)", flush=True)
+    run("lightgbm", y, lgbm_factory, 24, 48)
+    run("lightgbm+cqr (cf=0.2)", y, cqr(lgbm_factory), 24, 48)
 
     # 2) True day-ahead (96 quarter-hours = one local day = production horizon).
-    print("\n[H=96, windows=12]  (true day-ahead)", flush=True)
+    print("\n[H=96, windows=48]  (true day-ahead)", flush=True)
     store: dict = {}
-    run("lightgbm", y, lgbm_factory, 96, 12, store)
-    run("lightgbm+cqr (cf=0.2)", y, cqr(lgbm_factory), 96, 12, store)
-    run("ensemble", y, ens_factory, 96, 12, store)
-    run("ensemble+cqr (cf=0.2)", y, cqr(ens_factory), 96, 12, store)
+    run("lightgbm", y, lgbm_factory, 96, 48, store)
+    run("lightgbm+cqr (cf=0.2)", y, cqr(lgbm_factory), 96, 48, store)
+    run("ensemble", y, ens_factory, 96, 48, store)
+    run("ensemble+cqr (cf=0.2)", y, cqr(ens_factory), 96, 48, store)
 
     # 3) cal_fraction sweep for lightgbm+CQR @ H=96 (coverage calibration).
-    print("\n[cal_fraction sweep — lightgbm+cqr, H=96, windows=12]", flush=True)
+    print("\n[cal_fraction sweep — lightgbm+cqr, H=96, windows=48]", flush=True)
     for cf in (0.3, 0.4):
-        run(f"cf={cf}", y, cqr(lgbm_factory, cal_fraction=cf), 96, 12)
+        run(f"cf={cf}", y, cqr(lgbm_factory, cal_fraction=cf), 96, 48)
 
     # 4) Diebold-Mariano: ensemble point vs lightgbm point @ H=96.
     print("\n[Diebold-Mariano — point forecast, H=96]", flush=True)

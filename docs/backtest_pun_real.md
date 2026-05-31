@@ -1,78 +1,89 @@
-# PUN day-ahead backtest — REAL data (not synthetic)
+# PUN day-ahead backtest — REAL data (242 days, refreshed 2026-05-31)
 
-Rolling-origin walk-forward backtest on the **real GME electricity series** ingested
-in the DB: **PUN, 15-min, 4416 quarter-hours = 46 days** (2026-04-14 → 2026-05-30;
-price mean 117.3, std 43.8, min 0.0, max 215.6 EUR/MWh). Reproduce with
+Rolling-origin walk-forward on the **real GME electricity series**: **PUN, 15-min,
+23 232 quarter-hours = 242 days** (2025-09-30 → 2026-05-30; price mean 121.8,
+std 31.7, min 0.0, max 279.8 EUR/MWh), **48 windows**. Reproduce with
 `scripts/backtest_real_pun.py` (uses `.venv`; no synthetic/demo data).
 
+> **Supersedes the prior 46-day run.** That doc was computed before the deep
+> backfill brought the DB to 242 days; `get_prices` has no row cap, so the old
+> numbers were simply a smaller sample. The headline conclusions mostly hold, but
+> **two things changed materially on the larger sample** — see findings 1–2.
+
 Metric conventions: **rMAE** = MAE(model)/MAE(seasonal-naive same-hour-last-week);
-`< 1` beats the naive benchmark. **coverage** = empirical fraction of actuals inside
-the widest predictive band (q0.1–q0.9, **nominal 0.80**). Lower pinball is better.
+`< 1` beats the naive benchmark. **coverage** = empirical fraction of actuals
+inside the widest predictive band (q0.1–q0.9, **nominal 0.80**). Lower pinball is
+better.
 
 ## Headline numbers
 
-### H=96 — true day-ahead (production horizon: 24h × 15-min = 96 steps), 12 windows, n=1152
+### H=96 — true day-ahead (production horizon: 24h × 15-min = 96 steps), 48 windows, n=4608
 | model | rMAE | MAE €/MWh | avg pinball | coverage / nominal |
 |---|---|---|---|---|
-| lightgbm            | **0.654** | 14.52 | 5.584 | 0.540 / 0.80 |
-| lightgbm + CQR (cf=0.2) | 0.654 | 14.52 | 5.994 | 0.961 / 0.80 |
-| ensemble (LEAR+LGBM)| 0.731 | 16.24 | 5.790 | **0.806 / 0.80** |
-| ensemble + CQR (cf=0.2) | 0.731 | 16.24 | 6.191 | 0.838 / 0.80 |
+| **lightgbm**            | **0.689** | **16.55** | 6.287 | 0.579 / 0.80 |
+| lightgbm + CQR (cf=0.2) | 0.689 | 16.55 | 7.212 | 0.959 / 0.80 |
+| ensemble (LEAR+LGBM)| 0.821 | 19.72 | 7.349 | 0.684 / 0.80 |
+| ensemble + CQR (cf=0.2) | 0.821 | 19.72 | 7.460 | 0.844 / 0.80 |
 
-### H=24 — the *literal* `energy backtest` default (24 periods = only 6h on 15-min data), 20 windows, n=480
+### H=24 — 6h-ahead intraday reference (24 periods on 15-min data), 48 windows, n=1152
 | model | rMAE | MAE €/MWh | avg pinball | coverage / nominal |
 |---|---|---|---|---|
-| lightgbm            | 0.666 | 12.76 | 4.803 | 0.598 / 0.80 |
-| lightgbm + CQR (cf=0.2) | 0.666 | 12.76 | 5.659 | 0.979 / 0.80 |
+| lightgbm            | 0.582 | 12.92 | 4.845 | 0.648 / 0.80 |
+| lightgbm + CQR (cf=0.2) | 0.582 | 12.92 | 6.666 | 0.976 / 0.80 |
 
-> The CLI `--horizon` is counted in **periods**, so the default `24` evaluates a 6h
-> horizon on 15-min data, **not** the day-ahead task. Use `--horizon 96` for the
-> production day-ahead horizon. (A 30-window run of the exact user command
-> `energy backtest --market elec --zone PUN` gave rMAE 0.685, coverage 0.58 —
-> consistent with the 20-window 0.666 / 0.598 above.)
+> The CLI `--horizon` is counted in **periods of the series resolution**; its
+> default is now **one full delivery day** (96 on 15-min PUN = true day-ahead, not
+> 24 = 6h). Use `energy backtest` with no `--horizon` for the production task.
 
 ## Calibration (CQR) — does coverage approach nominal?
 
-cal_fraction sweep, **lightgbm + CQR, H=96, 12 windows**:
+cal_fraction sweep, **lightgbm + CQR, H=96, 48 windows**:
 
 | cal_fraction | coverage / nominal |
 |---|---|
-| 0.20 | 0.961 / 0.80 |
-| 0.30 | 0.959 / 0.80 |
-| 0.40 | 0.944 / 0.80 |
+| 0.20 | 0.959 / 0.80 |
+| 0.30 | 0.964 / 0.80 |
+| 0.40 | 0.968 / 0.80 |
 
-**Finding.** On this 46-day history CQR **over-covers** (≈0.94–0.98 vs 0.80) at both
-horizons, and **tuning `cal_fraction` does not fix it** (0.96→0.94 from cf 0.2→0.4 —
-structural, not a sample-size effect). The conformal offset is calibrated on the
-recent (more volatile) tail and over-widens the bands for the calmer test horizon;
-CQR was originally tuned on the synthetic MVP where the **base** bands *under*-covered
-(≈0.63→0.80). The raw LightGBM bands instead badly *under*-cover (0.540 at H=96).
+**Finding (unchanged).** CQR **over-covers** (≈0.96–0.97 vs 0.80) on lightgbm and
+**tuning `cal_fraction` does not fix it** — structural, not a sample-size effect.
+The conformal offset, calibrated on the recent (more volatile) tail, over-widens
+the bands for the calmer test horizon.
 
-The **ensemble's native bands are already ≈ nominal (0.806)** without any
-calibration — LEAR's residual-based quantiles widen LightGBM's too-narrow ones — so
-CQR on the ensemble is unnecessary and nudges it slightly over (0.838).
+## Point-forecast comparison — Diebold-Mariano (H=96, n=4608, abs-error loss)
 
-## Point-forecast comparison — Diebold-Mariano (H=96, n=1152, abs-error loss)
-
-`ensemble vs lightgbm`: MAE 16.24 vs 14.52 → **DM stat = +1.317, p = 0.188**
-(positive ⇒ ensemble has higher loss; **not significant**). LightGBM is the better
-point model here, but **not significantly**; the LEAR member (sklearn `LassoCV`
-fallback on only 46 days) adds noise rather than skill.
+`ensemble vs lightgbm`: MAE 19.72 vs 16.55 → **DM stat = +3.493, p = 0.0005**
+(positive ⇒ ensemble has higher loss; **significant**). **This changed on the
+larger sample:** on 46 days the gap was *not* significant (p=0.188); on 242 days
+**LightGBM significantly beats the ensemble**. The LEAR member (sklearn `LassoCV`
+fallback) adds noise, not skill, at this data volume.
 
 ## Recommendations
 
-1. **Point**: best is LightGBM alone (rMAE 0.654 day-ahead). All models beat
-   seasonal-naive (rMAE < 1), so the pipeline adds value.
-2. **Intervals**: keep the **ensemble** for its near-nominal, robust bands; **leave
-   `--calibrate` OFF for electricity by default** — the base ensemble is already
-   calibrated and CQR over-covers on the current short history. Re-evaluate CQR (and
-   the `cal_fraction` default, currently 0.2 — unchanged, sweep showed no gain) once
-   more history accrues or if base coverage drifts.
-3. **Deep model (NHITS/TFT) — DEFERRED, not promoted.** `torch`/`neuralforecast`
-   are not installed (GB-scale install + the box's TLS interception make it
-   fragile), and with only **46 days** a deep net is data-starved. Decisive evidence:
-   adding even a strong linear EPF benchmark (LEAR) to LightGBM yields **no
-   significant DM win** (p=0.19) and hurts the point error — a far more data-hungry
-   deep model will not clear the "significant DM win vs the ensemble" promotion bar
-   on this data volume. Revisit after the ENTSO-E multi-year backfill lands (the
-   ≥2-year regime-aware plan), per `market-data-architecture`.
+1. **Point — LightGBM alone, now decisively.** rMAE 0.689 day-ahead, and the DM
+   advantage over the ensemble is **significant** (p=0.0005) on 242 days — it was
+   only suggestive on 46. All models still beat seasonal-naive (rMAE < 1).
+2. **Intervals — no configuration is well-calibrated on 242 days.** lightgbm base
+   *under*-covers badly (0.579), lightgbm+CQR *over*-covers (0.959), ensemble base
+   *under*-covers (0.684), ensemble+CQR is **closest to nominal (0.844)**. The
+   46-day finding that the ensemble's *native* bands sit ≈ nominal (≈0.806) **does
+   NOT replicate** on the larger, calmer sample.
+3. **⚠️ Production model decision (flagged, not auto-changed).** Production
+   currently emits the **ensemble with CQR off** (`runner._select_model` elec +
+   `calibrate=False`). On 242 days that config is dominated on point (significantly
+   worse than lightgbm) **and** under-covers (0.684). The data now supports:
+   - **point-first / risk-aware:** switch elec to **LightGBM + CQR** — best point
+     and conservative (over-covering, ~0.96) bands, which is the safe failure mode
+     for a trading-risk tool; or
+   - **calibration-first:** **ensemble + CQR** for the closest-to-nominal coverage
+     (0.844), accepting the worse point error.
+
+   This is a genuine point-vs-interval trade-off (no dominant config), so it is
+   **left for an explicit decision** rather than changed autonomously. The gas
+   model (`psv_basis`) was switched because its win was unambiguous; the elec
+   choice is not.
+4. **Deep model (NHITS/TFT) — still DEFERRED.** 242 days remains data-starved for a
+   deep net, and the ensemble's extra (linear EPF) member already fails to beat a
+   single GBM here. Revisit after the **ENTSO-E multi-year backfill + exogenous
+   drivers** land (load/wind+solar are still absent — see `runner` exog warning),
+   which is the real unlock for both deep models and regime-aware modelling.

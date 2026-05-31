@@ -144,7 +144,11 @@ def backtest(
     market: str = typer.Option("elec", help="elec | gas | ttf"),
     zone: str = typer.Option("PUN", help="Electricity zone for the backtest."),
     model: str = typer.Option("lightgbm", help="baseline | lightgbm | lear | sarimax | ensemble"),
-    horizon: int = typer.Option(24, help="Forecast horizon in periods per window."),
+    horizon: int = typer.Option(
+        None,
+        help="Forecast horizon in periods of the series resolution. "
+        "Default: one full delivery day (96 for 15-min, 24 hourly, 1 daily).",
+    ),
     windows: int = typer.Option(30, help="Number of rolling-origin windows."),
     calibrate: bool = typer.Option(
         False, "--calibrate", help="Wrap the model in CQR conformal calibration."
@@ -171,6 +175,18 @@ def backtest(
 
     y = df["price"].astype(float).sort_index()
     y = y[~y.index.duplicated(keep="last")]
+
+    # Default horizon = one full delivery day, in periods of the series' own
+    # resolution (so 15-min PUN → 96 steps = true day-ahead, not 24 steps = 6h).
+    if horizon is None:
+        import pandas as pd
+
+        spacing = y.index.to_series().diff().median()
+        if pd.isna(spacing) or spacing <= pd.Timedelta(0):
+            horizon = 24
+        else:
+            minutes = spacing / pd.Timedelta(minutes=1)
+            horizon = max(1, int(round(24 * 60 / minutes)))
 
     def make_factory():
         if model == "ensemble":

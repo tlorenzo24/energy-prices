@@ -7,31 +7,33 @@ requires-python = ">=3.11"
 authors = [{ name = "Energia Capitale" }]
 
 dependencies = [
-    # core
-    "pandas>=2.1",
+    # core. Upper bounds cap the next major where an API/behaviour break is likely
+    # (esp. apscheduler 4.x, sqlalchemy/pydantic majors, and the ML/data libs whose
+    # bumps shift model output) — for reproducible images, pair with a lockfile.
+    "pandas>=2.1,<4",
     "numpy>=1.26,<2.1",
-    "sqlalchemy>=2.0",
-    "pydantic>=2.6",
-    "pydantic-settings>=2.2",
-    "requests>=2.31",
+    "sqlalchemy>=2.0,<3",
+    "pydantic>=2.6,<3",
+    "pydantic-settings>=2.2,<3",
+    "requests>=2.31,<3",
     "truststore>=0.9",  # use OS trust store for TLS (corporate/AV proxies)
     "python-dateutil>=2.9",
     "holidays>=0.45",
-    "scikit-learn>=1.4",
+    "scikit-learn>=1.4,<2",
     "typer>=0.12",
     "rich>=13.7",
-    "apscheduler>=3.10",
+    "apscheduler>=3.10,<4",
     "tenacity>=8.2",
     # ingestion
     "entsoe-py>=0.8.0",
     "yfinance>=0.2.40",
     "lxml>=5.1",
     # models
-    "lightgbm>=4.3",
-    "statsmodels>=0.14",
+    "lightgbm>=4.3,<5",
+    "statsmodels>=0.14,<0.15",
     # dashboard
-    "streamlit>=1.42",
-    "plotly>=5.20",
+    "streamlit>=1.42,<2",
+    "plotly>=5.20,<7",
 ]
 
 [project.optional-dependencies]
