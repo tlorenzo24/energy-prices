@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from functools import lru_cache
 
 from sqlalchemy import Engine, create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from energy_prices.config import get_settings
@@ -155,4 +156,7 @@ def init_db() -> None:
     Base.metadata.create_all(engine)
     if settings.is_postgres:
         _enable_timescale(engine)
-    logger.info("Database initialized at %s", settings.database_url)
+    logger.info(
+        "Database initialized at %s",
+        make_url(settings.database_url).render_as_string(hide_password=True),
+    )

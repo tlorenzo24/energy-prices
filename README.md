@@ -102,8 +102,13 @@ python scripts/migrate_sqlite_to_postgres.py --source sqlite:///./data/energy_pr
 - **Auth dashboard:** `ENERGY_DASHBOARD_PASSWORD` attiva un gate a password
   condivisa (difesa in profondità; per auth per-utente usare Streamlit OIDC).
 - **VPN (sharing):** esponi la dashboard ai colleghi via **Tailscale** (rete
-  privata, zero-config) — es. `tailscale up` sulla macchina host e condividi
-  l'IP `100.x.y.z:8501`. Niente porte aperte su Internet, niente cloud.
+  privata, zero-config). La porta della dashboard è pubblicata **solo su
+  `127.0.0.1`** (vedi `docker-compose.yml`), quindi `tailscale up` da solo non
+  basta: sull'host esegui `tailscale serve --bg 8501` per proxare la porta
+  loopback sul tailnet (consigliato), **oppure** cambia il mapping in
+  `docker-compose.yml` da `"127.0.0.1:8501:8501"` a `"<tailscale-ip>:8501:8501"`.
+  I colleghi raggiungono poi l'IP Tailscale `100.x.y.z:8501`. Niente porte aperte
+  su Internet, niente cloud.
 - Lo scheduler fa il ciclo giornaliero **ingest + forecast + alert** ~13:30 CET
   (orario configurabile via `ENERGY_SCHEDULER_*`).
 
@@ -137,7 +142,7 @@ src/energy_prices/
   forecasting/   runner.py (batch → tabella forecasts), evaluation.py (rMAE/CRPS/DM)
   alerts.py / notifications.py   regole alert prezzo + consegna (webhook n8n / SMTP)
   dashboard/     app.py
-  cli.py         comandi: init-db, seed-demo, ingest, backfill, forecast, backtest, dashboard, scheduler
+  cli.py         comandi: init-db, seed-demo, ingest, backfill, gme-inspect, forecast, backtest, alerts, dashboard, scheduler
 ```
 
 ## Comandi CLI
@@ -149,7 +154,7 @@ src/energy_prices/
 | `energy ingest --source all` | scarica i dati reali (ENTSO-E/GME/TTF/fondamentali) |
 | `energy backfill --from 2015-01-01` | backfill storico a blocchi (rispetta i limiti API) |
 | `energy gme-inspect` | scarica un campione GME e mostra i campi reali (valida il parser) |
-| `energy forecast --market elec\|gas [--zone NORD] [--calibrate]` | calcola e salva i forecast (`--calibrate` = intervalli CQR onesti) |
+| `energy forecast --market elec\|gas [--zone NORD] [--calibrate]` | calcola e salva i forecast (l'elettrico è sempre calibrato CQR; `--calibrate` aggiunge CQR anche a gas/TTF) |
 | `energy backtest --market elec --zone NORD [--calibrate]` | walk-forward + metriche (rMAE/CRPS/coverage) |
 | `energy alerts` | valuta le regole di alert prezzo sui forecast più recenti |
 | `energy dashboard` | avvia la dashboard Streamlit |

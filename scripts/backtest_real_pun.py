@@ -41,7 +41,7 @@ def load_pun():
 
 def fmt(agg: dict) -> str:
     cov, nom = agg["coverage"], agg["nominal_coverage"]
-    covs = f"{cov:.3f}/{nom:.2f}" if cov == cov else "n/a"
+    covs = f"{cov:.3f}/{nom:.2f}" if cov == cov and nom is not None else "n/a"
     return (
         f"rMAE={agg['rmae']:.3f}  MAE={agg['mae']:.2f}  "
         f"pinball={agg['avg_pinball']:.3f}  cov/nom={covs}  "

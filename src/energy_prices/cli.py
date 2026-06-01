@@ -16,7 +16,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from energy_prices.config import Market, get_settings
+from energy_prices.config import Market, Zone, get_settings
 
 app = typer.Typer(add_completion=False, help="GME electricity & gas prices + forecasting.")
 console = Console()
@@ -32,7 +32,26 @@ def _setup_logging() -> None:
 def _parse_date(value: str | None) -> dt.date | None:
     if value is None:
         return None
-    return dt.date.fromisoformat(value)
+    try:
+        return dt.date.fromisoformat(value)
+    except ValueError as exc:
+        raise typer.BadParameter(f"invalid date {value!r} (expected YYYY-MM-DD)") from exc
+
+
+def _validate_elec_zone(zone: str) -> str:
+    """Validate an electricity zone against the Zone enum (case-insensitive)."""
+    z = zone.upper()
+    valid = {m.value for m in Zone}
+    if z not in valid:
+        raise typer.BadParameter(f"unknown zone {zone!r}; expected one of {sorted(valid)}")
+    return z
+
+
+def _redacted_url(url: str) -> str:
+    """Render a DB URL with the password masked (so init-db never logs secrets)."""
+    from sqlalchemy.engine import make_url
+
+    return make_url(url).render_as_string(hide_password=True)
 
 
 # Friendly market aliases -> Market enum value.
@@ -54,7 +73,7 @@ def init_db_cmd() -> None:
     from energy_prices.storage.db import init_db
 
     init_db()
-    console.print(f"[green]Database initialised[/] at {get_settings().database_url}")
+    console.print(f"[green]Database initialised[/] at {_redacted_url(get_settings().database_url)}")
 
 
 @app.command("seed-demo")
@@ -107,7 +126,10 @@ def forecast(
     zone: str | None = typer.Option(None, help="Electricity zone (NORD…SARD or PUN)."),
     horizon_hours: int | None = typer.Option(None, help="Forecast horizon in hours."),
     calibrate: bool = typer.Option(
-        False, "--calibrate", help="Conformalize (CQR) the intervals for honest coverage."
+        False,
+        "--calibrate",
+        help="Conformalize (CQR) the intervals for honest coverage. "
+        "Electricity is always CQR-calibrated; this flag only adds CQR to gas/TTF.",
     ),
 ) -> None:
     """Compute and persist probabilistic forecasts."""
@@ -120,11 +142,16 @@ def forecast(
     elif market in _MARKET_ALIASES and _MARKET_ALIASES[market] == Market.ELEC_DAYAHEAD.value:
         if zone:
             saved = runner.run_forecasts(
-                Market.ELEC_DAYAHEAD.value, zone.upper(), horizon_hours, calibrate=calibrate
+                Market.ELEC_DAYAHEAD.value, _validate_elec_zone(zone), horizon_hours,
+                calibrate=calibrate,
             )
         else:
             saved = runner.run_all_electricity_zones(calibrate=calibrate)
     elif market in _MARKET_ALIASES:
+        if zone is not None:
+            raise typer.BadParameter(
+                f"--zone is only valid for electricity; got market={market!r}"
+            )
         saved = runner.run_forecasts(_MARKET_ALIASES[market], None, horizon_hours, calibrate=calibrate)
     else:
         raise typer.BadParameter(f"unknown market {market!r}")
@@ -164,7 +191,7 @@ def backtest(
 
     market_value = _MARKET_ALIASES.get(market.lower(), market)
     is_elec = market_value == Market.ELEC_DAYAHEAD.value
-    lookup_zone = zone.upper() if is_elec else None
+    lookup_zone = _validate_elec_zone(zone) if is_elec else None
 
     with session_scope() as session:
         prices = PriceRepository(session)

@@ -184,6 +184,69 @@ def test_calibrated_forecaster_runs_and_calibrates():
     assert np.all(np.diff(vals, axis=1) >= -1e-6)  # non-crossing after widening
 
 
+def test_cqr_calibrated_coverage_approaches_nominal():
+    """CQR's purpose: held-out coverage moves toward nominal and beats the raw bands."""
+    from energy_prices.forecasting.evaluation import coverage
+    from energy_prices.models.base import Forecaster, ForecastResult
+    from energy_prices.models.calibration import CalibratedForecaster
+
+    class _NarrowBase(Forecaster):
+        """Deliberately too-tight bands (+/-0.5), so raw 80% coverage << 0.80."""
+        name, version = "narrow", "0"
+
+        def fit(self, y, exog=None):
+            self._mu = float(y.mean())
+            return self
+
+        def predict(self, idx, exog_future=None, quantiles=(0.1, 0.25, 0.5, 0.75, 0.9)):
+            offs = {0.1: -0.5, 0.25: -0.25, 0.5: 0.0, 0.75: 0.25, 0.9: 0.5}
+            df = pd.DataFrame({f"q{q:g}": self._mu + offs[q] for q in quantiles}, index=idx)
+            return ForecastResult(df, self.name, self.version)
+
+    idx = pd.date_range("2024-01-01", periods=24 * 40, freq="h", tz="UTC")
+    rng = np.random.default_rng(7)
+    y = pd.Series(rng.normal(100, 8, len(idx)), index=idx, name="price")
+    cut = len(y) - 24 * 5
+    y_fit, y_hold = y.iloc[:cut], y.iloc[cut:]
+
+    raw = _NarrowBase().fit_predict(y_fit, y_hold.index).quantiles
+    cov_raw = coverage(y_hold, raw["q0.1"], raw["q0.9"])
+
+    cal = CalibratedForecaster(_NarrowBase(), cal_fraction=0.3, horizon=24)
+    cal_q = cal.fit_predict(y_fit, y_hold.index).quantiles
+    assert cal._offset_by_level  # calibration ran
+    cov_cal = coverage(y_hold, cal_q["q0.1"], cal_q["q0.9"])
+
+    nominal = 0.9 - 0.1  # 0.80
+    assert cov_raw < nominal - 0.05                          # raw under-covers (sanity)
+    assert abs(cov_cal - nominal) <= 0.12                    # CQR lands near nominal
+    assert abs(cov_cal - nominal) < abs(cov_raw - nominal)   # and improves on raw
+
+
+# --- Settings validation ----------------------------------------------------
+def test_log_level_is_normalized_and_validated():
+    from pydantic import ValidationError
+
+    from energy_prices.config.settings import Settings
+
+    assert Settings(log_level="info").log_level == "INFO"
+    assert Settings(log_level="Debug").log_level == "DEBUG"
+    with pytest.raises(ValidationError):
+        Settings(log_level="verbose")
+
+
+def test_scheduler_hour_minute_range_validation():
+    from pydantic import ValidationError
+
+    from energy_prices.config.settings import Settings
+
+    assert Settings(scheduler_hour=0, scheduler_minute=0).scheduler_hour == 0
+    with pytest.raises(ValidationError):
+        Settings(scheduler_hour=25)
+    with pytest.raises(ValidationError):
+        Settings(scheduler_minute=70)
+
+
 # --- Alerts -----------------------------------------------------------------
 def test_alerts_trigger_and_clear(tmp_db):
     import datetime as dt

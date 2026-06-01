@@ -470,11 +470,10 @@ def walk_forward(
 
     q_cols = [c for c in predictions.columns if _quantile_from_column(c) is not None]
     pooled_qdf = predictions[q_cols] if q_cols else pd.DataFrame(index=predictions.index)
-    pooled_nominal = (
-        float(np.nanmean([r["nominal_coverage"] for r in window_records]))
-        if any(r["nominal_coverage"] is not None for r in window_records)
-        else None
-    )
+    # Filter out None BEFORE averaging: np.nanmean([0.8, None]) raises TypeError,
+    # which would abort the whole backtest if any window emitted <2 quantiles.
+    _noms = [r["nominal_coverage"] for r in window_records if r["nominal_coverage"] is not None]
+    pooled_nominal = float(np.mean(_noms)) if _noms else None
     pooled_cov = (
         coverage(predictions["y_true"], predictions["pi_lower"], predictions["pi_upper"])
         if "pi_lower" in predictions else float("nan")

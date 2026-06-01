@@ -45,7 +45,7 @@ from typing import Any
 import requests
 from tenacity import (
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
@@ -67,7 +67,16 @@ SERIES_STORAGE_PCT = "gas_storage_pct"
 SERIES_NET_WITHDRAWAL = "gas_storage_net_withdrawal"
 RESOLUTION_MINUTES = 1440  # daily
 
-_RETRYABLE = (requests.exceptions.RequestException,)
+def _is_retryable(exc: BaseException) -> bool:
+    """Retry transient network errors and HTTP 429/5xx; fail fast on other 4xx."""
+    if isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+        return True
+    if isinstance(exc, requests.exceptions.HTTPError):
+        resp = getattr(exc, "response", None)
+        if resp is None:
+            return True  # no response attached -> treat as transient
+        return resp.status_code == 429 or resp.status_code >= 500
+    return False
 
 
 class GieClient:
@@ -90,7 +99,7 @@ class GieClient:
         reraise=True,
         stop=stop_after_attempt(4),
         wait=wait_exponential(multiplier=1, min=2, max=20),
-        retry=retry_if_exception_type(_RETRYABLE),
+        retry=retry_if_exception(_is_retryable),
     )
     def _get_page(self, start: dt.date, end: dt.date, page: int) -> dict[str, Any]:
         """Fetch a single page of the Italy storage series."""

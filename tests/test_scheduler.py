@@ -92,6 +92,62 @@ def test_daily_job_survives_ingestion_failure(tmp_db, monkeypatch):
     assert "finished_at" in summary and "forecast_rows" in summary
 
 
+def test_daily_job_survives_forecasting_failure(tmp_db, monkeypatch):
+    """A forecasting failure must be isolated to forecast_rows == 0."""
+    import energy_prices.forecasting.runner as runner_mod
+
+    monkeypatch.setattr(scheduler, "run_ingestion", lambda *a, **k: {})
+
+    def boom(*a, **k):
+        raise RuntimeError("forecast exploded")
+
+    monkeypatch.setattr(runner_mod, "run_all", boom)
+    summary = scheduler.daily_job(notify=False)
+    assert summary["forecast_rows"] == 0
+    assert "finished_at" in summary and "ingested" in summary
+
+
+def test_daily_job_survives_alert_failure(tmp_db, monkeypatch):
+    """An alert-eval failure must be isolated, with a stable summary shape."""
+    import energy_prices.alerts as alerts_mod
+    import energy_prices.forecasting.runner as runner_mod
+
+    monkeypatch.setattr(scheduler, "run_ingestion", lambda *a, **k: {})
+    monkeypatch.setattr(runner_mod, "run_all", lambda *a, **k: 0)
+
+    def boom(*a, **k):
+        raise RuntimeError("alerts exploded")
+
+    monkeypatch.setattr(alerts_mod, "evaluate_alerts", boom)
+    summary = scheduler.daily_job(notify=False)
+    assert summary["alerts_triggered"] == 0
+    # The except branch keeps the 'dispatch' key so the shape matches the success path.
+    assert summary["dispatch"]["delivered"] == 0
+    assert "finished_at" in summary
+
+
+def test_run_ingestion_persists_failure_audit_row(tmp_db, monkeypatch):
+    """A source failure must persist a 'failed' IngestionRun (not be rolled back)."""
+    import sqlalchemy as sa
+
+    from energy_prices.ingestion import ttf_client
+    from energy_prices.storage.db import session_scope
+    from energy_prices.storage.models import IngestionRun
+
+    def boom(session, start, end, **kwargs):
+        raise RuntimeError("ttf source exploded")
+
+    monkeypatch.setattr(ttf_client, "ingest", boom)
+    results = scheduler.run_ingestion(source="ttf")
+    assert results == {"ttf": 0}
+
+    with session_scope() as s:
+        rows = s.execute(sa.select(IngestionRun).where(IngestionRun.source == "ttf")).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].status == "failed"
+    assert "exploded" in (rows[0].message or "")
+
+
 # --- first-boot bootstrap ----------------------------------------------------
 def test_bootstrap_seeds_when_empty_and_demo(tmp_db):
     from energy_prices.config import Market, Zone

@@ -5,7 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Repo root = three levels up from this file (src/energy_prices/config/settings.py).
@@ -44,8 +44,8 @@ class Settings(BaseSettings):
     # --- Scheduler (daily ingest + forecast loop) ---
     # GME publishes the MGP results around 13:00–13:30 CET; the daily job runs a
     # little after to be safe. All overridable via ENERGY_SCHEDULER_* env vars.
-    scheduler_hour: int = 13
-    scheduler_minute: int = 30
+    scheduler_hour: int = Field(default=13, ge=0, le=23)
+    scheduler_minute: int = Field(default=30, ge=0, le=59)
     scheduler_run_on_start: bool = True
     # Grace window (seconds) for a missed fire (e.g. machine asleep / GME late).
     scheduler_misfire_grace: int = 3600
@@ -76,6 +76,18 @@ class Settings(BaseSettings):
     # non-commercial-use only, so a commercial deploy must either set this true
     # under a paid/self-hosted Open-Meteo plan or leave it off.
     enable_weather: bool = False
+
+    @field_validator("log_level")
+    @classmethod
+    def _normalize_log_level(cls, v: str) -> str:
+        """Upper-case and validate so `info`/`Info` work and typos fail cleanly."""
+        normalized = v.strip().upper()
+        valid = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}
+        if normalized not in valid:
+            raise ValueError(
+                f"log_level must be one of {sorted(valid)} (case-insensitive), got {v!r}"
+            )
+        return normalized
 
     @property
     def is_postgres(self) -> bool:

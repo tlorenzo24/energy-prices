@@ -17,6 +17,7 @@ import time
 
 from energy_prices.config import get_settings
 from energy_prices.storage.db import init_db, session_scope
+from energy_prices.storage.repositories import IngestionRepository
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,18 @@ def run_ingestion(
         except Exception as exc:  # noqa: BLE001 - isolate per-source failures
             logger.exception("ingest[%s] failed: %s", name, exc)
             results[name] = 0
+            # The client's own 'failed' audit row was written on the data session,
+            # which session_scope rolls back on error — so it never persists.
+            # Record the failure on a fresh, committed transaction so the audit
+            # log reflects failures, not only successes.
+            try:
+                now = dt.datetime.now(dt.UTC)
+                with session_scope() as audit_session:
+                    audit = IngestionRepository(audit_session)
+                    run = audit.start(name, now)
+                    audit.finish(run, status="failed", finished_at=now, rows=0, message=str(exc))
+            except Exception:  # noqa: BLE001 - never let audit logging mask the real failure
+                logger.exception("ingest[%s]: failed to persist failure audit row", name)
     return results
 
 
@@ -185,6 +198,8 @@ def daily_job(notify: bool = True) -> dict:
     except Exception as exc:  # noqa: BLE001 - isolate stage
         logger.exception("daily_job: alert evaluation/dispatch failed: %s", exc)
         summary["alerts_triggered"] = 0
+        # Keep the summary shape stable across success/failure branches.
+        summary["dispatch"] = {"delivered": 0, "error": str(exc)}
 
     summary["finished_at"] = dt.datetime.now(dt.UTC).isoformat()
     logger.info("daily_job: complete %s", summary)

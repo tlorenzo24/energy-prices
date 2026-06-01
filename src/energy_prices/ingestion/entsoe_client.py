@@ -25,7 +25,7 @@ from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import Timeout as RequestsTimeout
 from tenacity import (
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
@@ -55,12 +55,21 @@ _MAX_WINDOW = dt.timedelta(days=366)
 _LOAD_FORECAST = "load_forecast"
 _WIND_SOLAR_FORECAST = "wind_solar_forecast"
 
-# Transient network/server errors worth retrying.
-_TRANSIENT = (HTTPError, RequestsConnectionError, RequestsTimeout)
+def _is_retryable(exc: BaseException) -> bool:
+    """Retry transient network errors and HTTP 429/5xx; fail fast on other 4xx."""
+    if isinstance(exc, (RequestsConnectionError, RequestsTimeout)):
+        return True
+    if isinstance(exc, HTTPError):
+        resp = getattr(exc, "response", None)
+        if resp is None:
+            return True  # no response attached -> treat as transient
+        return resp.status_code == 429 or resp.status_code >= 500
+    return False
+
 
 _retry = retry(
     reraise=True,
-    retry=retry_if_exception_type(_TRANSIENT),
+    retry=retry_if_exception(_is_retryable),
     stop=stop_after_attempt(4),
     wait=wait_exponential(multiplier=1, min=2, max=30),
 )
@@ -226,6 +235,11 @@ class EntsoeClient:
         )
         if series is None or series.empty:
             return []
+        if isinstance(series, pd.DataFrame):
+            numeric = series.select_dtypes(include="number")
+            if numeric.empty:
+                return []
+            series = numeric.iloc[:, 0]  # 'Forecasted Load' for default process_type A01
         return self._exog_rows(zone, series, _LOAD_FORECAST, unit="MW")
 
     def _fetch_wind_solar(

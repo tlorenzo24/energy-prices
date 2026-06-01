@@ -27,12 +27,14 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from sklearn import __version__ as _SKLEARN_VERSION
 from sklearn.linear_model import LassoCV
 from sklearn.preprocessing import StandardScaler
 
 from energy_prices.features.build import (
     DEFAULT_LAG_HOURS,
     DEFAULT_ROLL_WINDOWS,
+    _periods_per_hour,
     build_feature_frame,
 )
 from energy_prices.models.base import (
@@ -43,6 +45,22 @@ from energy_prices.models.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _lassocv_alpha_kwargs(n_alphas: int) -> dict[str, Any]:
+    """Alpha-grid kwarg for LassoCV across the sklearn version range.
+
+    sklearn >=1.7 deprecates ``n_alphas`` in favour of an integer ``alphas``
+    (``n_alphas`` is removed in 1.9); <1.7 needs ``n_alphas`` (there ``alphas``
+    must be array-like). Keeps the always-available LEAR fallback warning-free
+    and forward-compatible.
+    """
+    try:
+        major, minor = (int(p) for p in _SKLEARN_VERSION.split(".")[:2])
+    except ValueError:  # unexpected version string -> assume modern sklearn
+        return {"alphas": n_alphas}
+    return {"alphas": n_alphas} if (major, minor) >= (1, 7) else {"n_alphas": n_alphas}
+
 
 # Optional reference back end. Guarded so missing deps never break import.
 try:  # pragma: no cover - exercised only where epftoolbox is installed
@@ -173,11 +191,13 @@ class LearForecaster(Forecaster):
         y = y.sort_index()
         y.index = self._ensure_utc(pd.DatetimeIndex(y.index))
         y = y[~y.index.duplicated(keep="last")].astype(float).dropna()
-        if len(y) < max(self.lag_hours) // max(
-            1, self._infer_resolution_minutes(y.index) // 60 or 1
-        ) + 2:
+        ppr = _periods_per_hour(pd.DatetimeIndex(y.index))
+        min_points = round(max(self.lag_hours) * ppr) + 2
+        if len(y) < min_points:
             logger.warning(
-                "lear: very short history (%d points); forecasts may be weak.", len(y)
+                "lear: very short history (%d points; need ~%d for the %dh lag); "
+                "forecasts may be weak.",
+                len(y), min_points, max(self.lag_hours),
             )
 
         self._resolution_minutes = self._infer_resolution_minutes(y.index)
@@ -261,7 +281,7 @@ class LearForecaster(Forecaster):
         n_samples = x_scaled.shape[0]
         cv = max(2, min(self.cv, n_samples)) if n_samples >= 4 else None
         self._model = LassoCV(
-            n_alphas=self.n_alphas,
+            **_lassocv_alpha_kwargs(self.n_alphas),
             cv=cv,
             random_state=self.random_state,
             max_iter=10_000,
