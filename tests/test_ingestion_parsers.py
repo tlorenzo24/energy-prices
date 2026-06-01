@@ -648,6 +648,95 @@ class TestGieRecordsToObservations:
 
 
 # ===========================================================================
+# 5b. ENTSO-E exogenous decoding path (_exog_rows / _sum_wind_solar)
+# ===========================================================================
+class TestEntsoeExogRows:
+    """Guard the _exog_rows and _fetch_load DataFrame->Series reduction (Fix #4).
+
+    All tests run under -W error::DeprecationWarning (configured in pytest.ini /
+    pyproject.toml or passed on the command line) to catch NumPy scalar-coercion
+    regressions immediately.
+    """
+
+    def _make_series(self, values, freq="h"):
+        idx = pd.date_range("2025-01-15", periods=len(values), freq=freq, tz="UTC")
+        return pd.Series(values, index=idx, dtype=float)
+
+    def test_exog_rows_from_series_values_are_python_floats(self):
+        """_exog_rows on a Series produces rows whose 'value' is a Python float."""
+        series = self._make_series([100.0, 200.0])
+        rows = ent.EntsoeClient._exog_rows(Zone.NORD, series, "load_forecast", unit="MW")
+        assert len(rows) == 2
+        assert rows[0]["value"] == pytest.approx(100.0)
+        assert rows[1]["value"] == pytest.approx(200.0)
+        # Must be a plain Python float, not a numpy ndarray or numpy scalar.
+        for row in rows:
+            assert type(row["value"]) is float, (
+                f"expected float, got {type(row['value'])}"
+            )
+
+    def test_exog_rows_resolution_and_tz(self):
+        """_exog_rows infers resolution_minutes and stores tz-aware valid_start."""
+        series = self._make_series([50.0], freq="h")
+        rows = ent.EntsoeClient._exog_rows(Zone.NORD, series, "load_forecast", unit="MW")
+        assert len(rows) == 1
+        assert rows[0]["resolution_minutes"] == 60
+        assert rows[0]["valid_start"].tzinfo is not None
+        assert rows[0]["valid_start"].utcoffset() == dt.timedelta(0)
+
+    def test_exog_rows_from_single_column_dataframe_values_are_python_floats(self):
+        """Simulates Fix #4: a DataFrame is reduced to its numeric first column
+        before being passed to _exog_rows, so 'value' must be a plain float."""
+        idx = pd.date_range("2025-01-15", periods=2, freq="h", tz="UTC")
+        df = pd.DataFrame({"Forecasted Load": [100.0, 200.0]}, index=idx)
+        # Mimic the _fetch_load reduction introduced by Fix A.
+        numeric = df.select_dtypes(include="number")
+        assert not numeric.empty
+        series = numeric.iloc[:, 0]
+        rows = ent.EntsoeClient._exog_rows(Zone.NORD, series, "load_forecast", unit="MW")
+        assert len(rows) == 2
+        assert rows[0]["value"] == pytest.approx(100.0)
+        assert rows[1]["value"] == pytest.approx(200.0)
+        for row in rows:
+            assert type(row["value"]) is float, (
+                f"expected float, got {type(row['value'])}"
+            )
+        # valid_start must be tz-aware UTC.
+        assert rows[0]["valid_start"] == dt.datetime(2025, 1, 15, 0, 0, tzinfo=_UTC)
+        assert rows[1]["valid_start"] == dt.datetime(2025, 1, 15, 1, 0, tzinfo=_UTC)
+
+    def test_sum_wind_solar_sums_rowwise(self):
+        """_sum_wind_solar sums all numeric columns across axis=1."""
+        idx = pd.date_range("2025-01-15", periods=3, freq="h", tz="UTC")
+        df = pd.DataFrame(
+            {"Solar": [10.0, 20.0, 30.0], "Wind Onshore": [5.0, 15.0, 25.0]},
+            index=idx,
+        )
+        result = ent.EntsoeClient._sum_wind_solar(df)
+        assert result is not None
+        assert list(result) == pytest.approx([15.0, 35.0, 55.0])
+
+    def test_sum_wind_solar_passthrough_series(self):
+        """_sum_wind_solar returns a Series unchanged when passed a Series."""
+        series = self._make_series([42.0, 43.0])
+        result = ent.EntsoeClient._sum_wind_solar(series)
+        assert result is series
+
+    def test_sum_wind_solar_empty_df_returns_none(self):
+        result = ent.EntsoeClient._sum_wind_solar(pd.DataFrame())
+        assert result is None
+
+    def test_exog_rows_skips_nan_values(self):
+        """NaN entries must be silently dropped, not produce rows."""
+        import math
+        series = self._make_series([100.0, float("nan"), 300.0])
+        rows = ent.EntsoeClient._exog_rows(Zone.NORD, series, "load_forecast", unit="MW")
+        assert len(rows) == 2
+        for row in rows:
+            assert not math.isnan(row["value"])
+
+
+# ===========================================================================
 # 7. Weather: population-weighted temp + HDD/CDD + renormalisation
 # ===========================================================================
 from energy_prices.ingestion import weather_client as wx  # noqa: E402

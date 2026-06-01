@@ -21,6 +21,7 @@ import logging
 import smtplib
 from email.message import EmailMessage
 from typing import Any
+from urllib.parse import urlsplit
 
 from energy_prices.config import Settings, get_settings
 
@@ -29,6 +30,17 @@ logger = logging.getLogger(__name__)
 # Network timeout for the webhook POST (seconds). Short: the daily job must not
 # hang on a slow/unreachable endpoint.
 _WEBHOOK_TIMEOUT = 15
+
+
+def _redact_url(url: str | None) -> str:
+    """Scheme+host only — the n8n /webhook/<uuid> path is a secret, never log it."""
+    if not url:
+        return "<unset>"
+    try:
+        parts = urlsplit(url)
+        return f"{parts.scheme}://{parts.netloc}" if parts.netloc else "<webhook>"
+    except Exception:  # noqa: BLE001 - logging must never raise
+        return "<webhook>"
 
 
 # ---------------------------------------------------------------------------
@@ -98,10 +110,10 @@ def _post_webhook(payload: dict, settings: Settings) -> bool:
         )
         resp.raise_for_status()
         logger.info("Webhook delivered %d alert(s) -> %s (HTTP %s)",
-                    payload["n_alerts"], settings.alert_webhook_url, resp.status_code)
+                    payload["n_alerts"], _redact_url(settings.alert_webhook_url), resp.status_code)
         return True
     except Exception as exc:  # noqa: BLE001 - never crash the caller
-        logger.error("Webhook delivery failed (%s): %s", settings.alert_webhook_url, exc)
+        logger.error("Webhook delivery failed (%s): %s", _redact_url(settings.alert_webhook_url), exc)
         return False
 
 

@@ -349,6 +349,10 @@ def seed_demo(
     forecasts are produced separately by the real runner. All rows carry
     ``source="demo"``.
     """
+    if days <= 0:
+        logger.warning("seed_demo: days=%s <= 0 -> nothing to write", days)
+        return 0
+
     rng = np.random.default_rng(seed)
 
     end_day = end or dt.datetime.now(dt.UTC).date()

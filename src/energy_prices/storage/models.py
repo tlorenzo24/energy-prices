@@ -35,7 +35,10 @@ class PriceObservation(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     market: Mapped[str] = mapped_column(String(32), nullable=False)
-    zone: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # "" is the sentinel for national/zone-less series (gas, TTF). NOT NULL so the
+    # uq_price_obs unique index actually fires on re-ingest: SQL treats NULL != NULL,
+    # so a nullable zone would never match in ON CONFLICT and rows would duplicate.
+    zone: Mapped[str] = mapped_column(String(8), nullable=False, default="", server_default="")
     delivery_start: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     resolution_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
     price: Mapped[float] = mapped_column(Float, nullable=False)
@@ -68,7 +71,8 @@ class Forecast(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     run_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     market: Mapped[str] = mapped_column(String(32), nullable=False)
-    zone: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # "" sentinel for national/zone-less series — see PriceObservation.zone.
+    zone: Mapped[str] = mapped_column(String(8), nullable=False, default="", server_default="")
     target_start: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     resolution_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
     model_name: Mapped[str] = mapped_column(String(48), nullable=False)
@@ -106,7 +110,8 @@ class ExogenousObservation(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     series: Mapped[str] = mapped_column(String(48), nullable=False)  # e.g. load_forecast
-    zone: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # "" sentinel for national/zone-less series — see PriceObservation.zone.
+    zone: Mapped[str] = mapped_column(String(8), nullable=False, default="", server_default="")
     valid_start: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     resolution_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
     value: Mapped[float] = mapped_column(Float, nullable=False)

@@ -4,7 +4,8 @@ Orchestration glue between the storage repositories, the feature builder and the
 family of :class:`~energy_prices.models.base.Forecaster` implementations. For a
 given ``(market, zone)`` it loads the trailing price history (inferring the 60 or
 15-minute electricity grid, or daily for gas/TTF), selects a model (electricity ->
-ensemble, gas -> gas ensemble, TTF -> SARIMAX) with a robust fall back to the
+LightGBM, CQR-wrapped by the runner; gas -> PSV = TTF forecast + mean-reverting
+basis; TTF -> SARIMAX) with a robust fall back to the
 seasonal-naive baseline, builds the future ``horizon_index`` (next delivery day for
 day-ahead electricity, a multi-day horizon for gas/TTF), pulls exogenous driver
 history plus any *future* forecasts already ingested for the horizon (ENTSO-E load /
@@ -123,19 +124,28 @@ def _build_horizon_index(
     freq = pd.Timedelta(minutes=resolution_minutes)
 
     if _is_electricity(market):
-        hours = horizon_hours if horizon_hours is not None else _DEFAULT_ELEC_HORIZON_HOURS
         anchor_local = pd.Timestamp(run_at).tz_convert(_LOCAL_TZ)
         # Next delivery day 00:00 local; if we already have data past run day,
         # start the day after the last delivered day so we never re-forecast past.
-        start_day = (anchor_local + pd.Timedelta(days=1)).normalize()
+        start_local = (anchor_local + pd.DateOffset(days=1)).normalize()
         if last_delivery is not None:
             last_local_day = pd.Timestamp(last_delivery).tz_convert(_LOCAL_TZ).normalize()
-            candidate = last_local_day + pd.Timedelta(days=1)
-            if candidate > start_day:
-                start_day = candidate
-        start_utc = start_day.tz_convert("UTC")
-        periods = max(1, int(round(hours * 60 / resolution_minutes)))
-        return pd.date_range(start=start_utc, periods=periods, freq=freq, tz="UTC")
+            candidate = (last_local_day + pd.DateOffset(days=1)).normalize()
+            if candidate > start_local:
+                start_local = candidate
+        # Honour an explicit horizon_hours; otherwise span exactly the local
+        # delivery day. Using a CALENDAR-day end boundary (DateOffset, not a fixed
+        # Timedelta) makes the 23h/25h DST-transition days emit the right count
+        # automatically: 92/100 quarter-hours (or 23/25 hours), 96/24 otherwise.
+        if horizon_hours is not None:
+            end_local = start_local + pd.Timedelta(hours=horizon_hours)
+        else:
+            end_local = start_local + pd.DateOffset(days=1)  # calendar day, DST-aware
+        start_utc = start_local.tz_convert("UTC")
+        end_utc = pd.Timestamp(end_local).tz_convert("UTC")
+        return pd.date_range(
+            start=start_utc, end=end_utc, freq=freq, inclusive="left", tz="UTC"
+        )
 
     # Gas / TTF: daily steps from the day after the last observed delivery.
     hours = horizon_hours if horizon_hours is not None else _DEFAULT_GAS_HORIZON_HOURS
@@ -296,10 +306,11 @@ def _augment_with_ttf(
 def _select_model(market: str) -> Forecaster:
     """Lazily build the primary forecaster for a market.
 
-    Electricity -> :class:`EnsembleForecaster` (LEAR + LightGBM); gas ->
-    ``EnsembleForecaster.for_gas()`` (SARIMAX + LightGBM); TTF ->
-    :class:`SarimaxForecaster`. Raises ``ModelUnavailable`` / ``Exception`` to
-    the caller, which falls back to the seasonal-naive baseline.
+    Electricity -> :class:`LightGBMForecaster` (quantile GBM, CQR-wrapped by the
+    runner); gas -> :class:`PsvBasisForecaster` (PSV = TTF forecast +
+    mean-reverting basis); TTF -> :class:`SarimaxForecaster`. Raises
+    ``ModelUnavailable`` / ``Exception`` to the caller, which falls back to the
+    seasonal-naive baseline.
     """
     if _is_electricity(market):
         # Day-ahead electricity: LightGBM quantile GBM. On the 242-day backtest it
@@ -351,7 +362,9 @@ def _fit_predict_with_fallback(
         if calibrate:
             from energy_prices.models.calibration import CalibratedForecaster
 
-            model = CalibratedForecaster(model)
+            # Pass the operational horizon so CQR calibrates with rolling-origin
+            # blocks of the same length the model actually forecasts.
+            model = CalibratedForecaster(model, horizon=len(horizon_index))
         result = model.fit_predict(
             y, horizon_index, exog=exog, exog_future=exog_future
         )

@@ -1,12 +1,15 @@
 """One-shot migration: copy all data from the local SQLite DB into Postgres+Timescale.
 
 For the shared (colleagues) deployment we move from the zero-setup SQLite file to
-the Postgres+TimescaleDB system-of-record. This script copies every table
-(price_observations, forecasts, exogenous_observations, ingestion_runs) row for
-row, in batches, into a freshly initialised Postgres schema.
+the Postgres+TimescaleDB system-of-record. This script copies the time-series
+tables (price_observations, forecasts, exogenous_observations) row for row, in
+batches, into a freshly initialised Postgres schema.
 
-Idempotent-ish: the destination is created with the same UNIQUE constraints, and
-inserts use ON CONFLICT DO NOTHING (Postgres), so re-running skips duplicates.
+Idempotent for the supported SQLite->Postgres path: price/forecast/exogenous
+inserts use ON CONFLICT DO NOTHING against their UNIQUE constraints, so re-running
+skips duplicates. The ingestion_runs audit log is intentionally NOT migrated — it
+has no natural key (so ON CONFLICT could not de-dup it and re-runs would pile up
+duplicates) and is a per-deployment record with little value in the new database.
 
 Usage (from repo root, venv active):
 
@@ -31,23 +34,29 @@ from energy_prices.storage.models import (
     Base,
     ExogenousObservation,
     Forecast,
-    IngestionRun,
     PriceObservation,
 )
 
 logger = logging.getLogger("migrate")
 
 # Copy order is irrelevant (no FKs between tables) but kept stable for clear logs.
-TABLES = [PriceObservation, Forecast, ExogenousObservation, IngestionRun]
+# ingestion_runs is intentionally excluded (no natural key; per-deployment log).
+TABLES = [PriceObservation, Forecast, ExogenousObservation]
 _BATCH = 5_000
 
 
 def _rows(engine, model):
     """Yield all rows of a table as plain dicts (column -> value)."""
     cols = [c.name for c in model.__table__.columns]
+    has_zone = "zone" in cols
     with engine.connect() as conn:
         for row in conn.execute(select(model.__table__)).mappings():
-            yield {c: row[c] for c in cols}
+            d = {c: row[c] for c in cols}
+            # zone is NOT NULL DEFAULT '' in the new schema (the no-zone sentinel);
+            # legacy SQLite rows may carry NULL, so normalize before insert.
+            if has_zone and d.get("zone") is None:
+                d["zone"] = ""
+            yield d
 
 
 def _copy_table(src_engine, dst_engine, model, is_postgres_dst: bool) -> int:

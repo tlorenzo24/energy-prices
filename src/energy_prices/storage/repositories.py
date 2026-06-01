@@ -8,6 +8,7 @@ tidy pandas DataFrames (UTC-indexed). Models/dashboard never touch the ORM direc
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from typing import Any
 
 import pandas as pd
@@ -23,6 +24,8 @@ from energy_prices.storage.models import (
     PriceObservation,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _utc(value: dt.datetime | None) -> dt.datetime | None:
     if value is None:
@@ -30,6 +33,18 @@ def _utc(value: dt.datetime | None) -> dt.datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=dt.UTC)
     return value.astimezone(dt.UTC)
+
+
+# National/zone-less series (gas, TTF, country-level exogenous) are stored with
+# this non-null sentinel instead of NULL, so the unique indexes (which include
+# `zone`) actually fire on re-ingest. SQL treats NULL != NULL, which would
+# otherwise let an ON CONFLICT clause miss and duplicate rows pile up.
+_NO_ZONE = ""
+
+
+def _zone(zone: str | None) -> str:
+    """Normalize a zone (None -> the no-zone sentinel) for storage and filtering."""
+    return zone if zone else _NO_ZONE
 
 
 # Max rows per INSERT statement. Chunked so (rows * columns) stays well under
@@ -42,6 +57,14 @@ def _upsert(session: Session, table, rows: list[dict[str, Any]], index_elements:
     """Dialect-aware bulk upsert (SQLite & Postgres), chunked. Returns rows sent."""
     if not rows:
         return 0
+    # Collapse within-batch duplicates on the conflict key (keep last). Postgres
+    # ON CONFLICT DO UPDATE raises CardinalityViolation if one INSERT touches the
+    # same conflict row twice; SQLite silently keeps the last. Dedup here so both
+    # dialects behave identically and we never hit the prod-only failure.
+    deduped: dict[tuple, dict[str, Any]] = {}
+    for row in rows:
+        deduped[tuple(row.get(col) for col in index_elements)] = row
+    rows = list(deduped.values())
     dialect = session.bind.dialect.name  # type: ignore[union-attr]
     insert = pg_insert if dialect == "postgresql" else sqlite_insert
     total = 0
@@ -71,6 +94,7 @@ class PriceRepository:
         for obs in observations:
             row = dict(obs)
             row["delivery_start"] = _utc(row["delivery_start"])
+            row["zone"] = _zone(row.get("zone"))
             row.setdefault("currency", "EUR")
             row.setdefault("unit", "EUR/MWh")
             clean.append(row)
@@ -91,23 +115,31 @@ class PriceRepository:
         source: str | None = None,
     ) -> pd.DataFrame:
         """Return prices as a DataFrame indexed by delivery_start (UTC)."""
-        stmt = select(PriceObservation).where(PriceObservation.market == market)
-        if zone is not None:
-            stmt = stmt.where(PriceObservation.zone == zone)
+        stmt = select(PriceObservation).where(
+            PriceObservation.market == market,
+            PriceObservation.zone == _zone(zone),
+        )
         if source is not None:
             stmt = stmt.where(PriceObservation.source == source)
         if start is not None:
             stmt = stmt.where(PriceObservation.delivery_start >= _utc(start))
         if end is not None:
             stmt = stmt.where(PriceObservation.delivery_start <= _utc(end))
-        stmt = stmt.order_by(PriceObservation.delivery_start)
+        # Secondary sort on ingested_at/id so duplicate timestamps resolve
+        # deterministically and downstream `duplicated(keep="last")` keeps the
+        # freshest row regardless of physical scan order (Postgres/Timescale).
+        stmt = stmt.order_by(
+            PriceObservation.delivery_start,
+            PriceObservation.ingested_at,
+            PriceObservation.id,
+        )
         rows = self.session.execute(stmt).scalars().all()
         df = pd.DataFrame(
             [
                 {
                     "delivery_start": _utc(r.delivery_start),
                     "market": r.market,
-                    "zone": r.zone,
+                    "zone": r.zone or None,
                     "resolution_minutes": r.resolution_minutes,
                     "price": r.price,
                     "unit": r.unit,
@@ -122,9 +154,10 @@ class PriceRepository:
         return df
 
     def latest_delivery(self, market: str, zone: str | None = None) -> dt.datetime | None:
-        stmt = select(PriceObservation.delivery_start).where(PriceObservation.market == market)
-        if zone is not None:
-            stmt = stmt.where(PriceObservation.zone == zone)
+        stmt = select(PriceObservation.delivery_start).where(
+            PriceObservation.market == market,
+            PriceObservation.zone == _zone(zone),
+        )
         stmt = stmt.order_by(PriceObservation.delivery_start.desc()).limit(1)
         result = self.session.execute(stmt).scalar_one_or_none()
         return _utc(result)
@@ -135,7 +168,8 @@ class PriceRepository:
             .where(PriceObservation.market == market)
             .distinct()
         )
-        return [z for (z,) in self.session.execute(stmt).all() if z is not None]
+        # Drop both None and the "" no-zone sentinel: only real zones are returned.
+        return [z for (z,) in self.session.execute(stmt).all() if z]
 
 
 class ExogenousRepository:
@@ -152,6 +186,7 @@ class ExogenousRepository:
         for obs in observations:
             row = dict(obs)
             row["valid_start"] = _utc(row["valid_start"])
+            row["zone"] = _zone(row.get("zone"))
             row.setdefault("unit", None)
             clean.append(row)
         return _upsert(
@@ -170,14 +205,19 @@ class ExogenousRepository:
         end: dt.datetime | None = None,
     ) -> pd.Series:
         """Return one exogenous series as a UTC-indexed pandas Series named `series`."""
-        stmt = select(ExogenousObservation).where(ExogenousObservation.series == series)
-        if zone is not None:
-            stmt = stmt.where(ExogenousObservation.zone == zone)
+        stmt = select(ExogenousObservation).where(
+            ExogenousObservation.series == series,
+            ExogenousObservation.zone == _zone(zone),
+        )
         if start is not None:
             stmt = stmt.where(ExogenousObservation.valid_start >= _utc(start))
         if end is not None:
             stmt = stmt.where(ExogenousObservation.valid_start <= _utc(end))
-        stmt = stmt.order_by(ExogenousObservation.valid_start)
+        stmt = stmt.order_by(
+            ExogenousObservation.valid_start,
+            ExogenousObservation.ingested_at,
+            ExogenousObservation.id,
+        )
         rows = self.session.execute(stmt).scalars().all()
         if not rows:
             return pd.Series(dtype=float, name=series)
@@ -200,6 +240,7 @@ class ForecastRepository:
             row = dict(fc)
             row["run_at"] = _utc(row["run_at"])
             row["target_start"] = _utc(row["target_start"])
+            row["zone"] = _zone(row.get("zone"))
             row.setdefault("model_version", "0.1.0")
             row.setdefault("unit", "EUR/MWh")
             row.setdefault("quantile", 0.5)
@@ -215,9 +256,10 @@ class ForecastRepository:
     def latest_run_at(
         self, market: str, zone: str | None = None, model_name: str | None = None
     ) -> dt.datetime | None:
-        stmt = select(Forecast.run_at).where(Forecast.market == market)
-        if zone is not None:
-            stmt = stmt.where(Forecast.zone == zone)
+        stmt = select(Forecast.run_at).where(
+            Forecast.market == market,
+            Forecast.zone == _zone(zone),
+        )
         if model_name is not None:
             stmt = stmt.where(Forecast.model_name == model_name)
         stmt = stmt.order_by(Forecast.run_at.desc()).limit(1)
@@ -235,14 +277,51 @@ class ForecastRepository:
 
         If run_at is None and latest=True, uses the most recent run for the filter.
         """
+        zone_db = _zone(zone)
         if run_at is None and latest:
             run_at = self.latest_run_at(market, zone, model_name)
             if run_at is None:
                 return pd.DataFrame()
 
-        stmt = select(Forecast).where(Forecast.market == market)
-        if zone is not None:
-            stmt = stmt.where(Forecast.zone == zone)
+        # When no model is pinned, resolve the single model that owns this run so
+        # the pivot never blends quantiles from two models sharing a run_at.
+        if model_name is None and run_at is not None:
+            owners = [
+                m
+                for (m,) in self.session.execute(
+                    select(Forecast.model_name)
+                    .where(
+                        Forecast.market == market,
+                        Forecast.zone == zone_db,
+                        Forecast.run_at == _utc(run_at),
+                    )
+                    .distinct()
+                ).all()
+                if m
+            ]
+            if len(owners) > 1:
+                model_name = self.session.execute(
+                    select(Forecast.model_name)
+                    .where(
+                        Forecast.market == market,
+                        Forecast.zone == zone_db,
+                        Forecast.run_at == _utc(run_at),
+                    )
+                    .order_by(Forecast.id.desc())
+                    .limit(1)
+                ).scalar_one_or_none()
+                logger.warning(
+                    "Multiple models %s at run_at=%s for market=%s zone=%s; "
+                    "selecting most recent (%s).",
+                    owners, run_at, market, zone, model_name,
+                )
+            elif owners:
+                model_name = owners[0]
+
+        stmt = select(Forecast).where(
+            Forecast.market == market,
+            Forecast.zone == zone_db,
+        )
         if model_name is not None:
             stmt = stmt.where(Forecast.model_name == model_name)
         if run_at is not None:

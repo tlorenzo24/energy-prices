@@ -160,9 +160,16 @@ class EnsembleForecaster(Forecaster):
         if not member_results:
             raise ModelUnavailable("No ensemble members produced a forecast.")
 
-        # Single available member: return it unchanged (already non-crossing).
+        # Single available member: re-wrap in the ensemble's identity so the
+        # persisted model_name is always 'ensemble' (matches the >=2-member path
+        # and the CalibratedForecaster convention). Quantiles are already
+        # non-crossing from the member, so no re-sorting needed.
         if len(member_results) == 1:
-            return member_results[0]
+            return ForecastResult(
+                member_results[0].quantiles,
+                model_name=self.name,
+                model_version=self.version,
+            )
 
         averaged = self._average_quantiles(member_results, horizon_index, quantiles)
         averaged = self._sort_non_crossing(averaged)
@@ -171,7 +178,7 @@ class EnsembleForecaster(Forecaster):
     @staticmethod
     def _quantile_columns(quantiles: tuple[float, ...]) -> list[str]:
         """Canonical column names ('q0.1', ...) for the requested quantiles."""
-        return [f"q{q}" for q in quantiles]
+        return [f"q{float(q):g}" for q in quantiles]
 
     def _average_quantiles(
         self,
@@ -202,12 +209,20 @@ class EnsembleForecaster(Forecaster):
         """
         if quantiles_frame.empty:
             return quantiles_frame
-        values = quantiles_frame.to_numpy(dtype=float)
-        # Sort along columns; NaNs are pushed to the end by np.sort, which keeps
-        # any all-NaN rows intact and orders the present quantiles ascending.
-        sorted_values = np.sort(values, axis=1)
-        return pd.DataFrame(
-            sorted_values,
-            index=quantiles_frame.index,
-            columns=quantiles_frame.columns,
-        )
+        # Order columns by ascending quantile level so the smallest sorted value
+        # maps to the lowest level regardless of the caller's column order, then
+        # write the sorted values back into those same positions (leaving the
+        # frame's overall column order unchanged). Mirrors CalibratedForecaster.
+        levels: list[tuple[float, str]] = []
+        for c in quantiles_frame.columns:
+            try:
+                levels.append((float(str(c).lstrip("q")), c))
+            except ValueError:
+                continue
+        if not levels:
+            return quantiles_frame
+        ordered_cols = [c for _, c in sorted(levels)]
+        out = quantiles_frame.copy()
+        # np.sort pushes NaNs to the end within the ascending subset.
+        out[ordered_cols] = np.sort(out[ordered_cols].to_numpy(dtype=float), axis=1)
+        return out

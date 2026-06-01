@@ -109,15 +109,12 @@ def test_forecast_upsert_idempotent(tmp_db):
     assert len(fc) == 1 and float(fc["q0.5"].iloc[0]) == 150.0
 
 
-@pytest.mark.xfail(
-    reason="KNOWN BUG: NULL zones are treated as distinct in the unique index "
-    "(both SQLite and Postgres), so gas/TTF (zone=None) re-ingestion duplicates "
-    "rather than updates. Reads de-dup via keep='last', so forecasts stay correct, "
-    "but the table bloats. Fix needs a zone sentinel or a COALESCE(zone,'') unique "
-    "index — a schema decision flagged for review.",
-    strict=True,
-)
-def test_price_upsert_null_zone_should_dedup(tmp_db):
+def test_price_upsert_null_zone_dedups(tmp_db):
+    """National/gas series (zone=None) re-ingest must update in place, not duplicate.
+
+    Stored via the "" sentinel so the uq_price_obs unique index fires (SQL treats
+    NULL != NULL, which previously let NULL-zone rows pile up on every daily run).
+    """
     from energy_prices.storage.db import session_scope
     from energy_prices.storage.repositories import PriceRepository
 
@@ -128,7 +125,73 @@ def test_price_upsert_null_zone_should_dedup(tmp_db):
         repo.upsert([_price_row(None, ds, 20.0, market="gas_dayahead")])
     with session_scope() as s:
         df = PriceRepository(s).get_prices("gas_dayahead")
-    assert len(df) == 1  # fails today: two NULL-zone rows coexist
+    assert len(df) == 1
+    assert float(df["price"].iloc[0]) == 20.0
+    assert df["zone"].iloc[0] is None  # sentinel mapped back to None on read
+
+
+def test_exogenous_upsert_null_zone_dedups(tmp_db):
+    """National exogenous series (zone=None) must also dedup on re-ingest."""
+    from energy_prices.storage.db import session_scope
+    from energy_prices.storage.repositories import ExogenousRepository
+
+    vs = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+
+    def row(value):
+        return {
+            "series": "gas_storage_pct", "zone": None, "valid_start": vs,
+            "resolution_minutes": 1440, "value": value, "source": "gie",
+        }
+
+    with session_scope() as s:
+        repo = ExogenousRepository(s)
+        repo.upsert([row(55.0)])
+        repo.upsert([row(60.0)])
+    with session_scope() as s:
+        series = ExogenousRepository(s).get_series("gas_storage_pct")
+    assert len(series) == 1
+    assert float(series.iloc[0]) == 60.0
+
+
+def test_price_upsert_within_batch_duplicate_key_collapses(tmp_db):
+    """A single upsert call with a repeated natural key keeps the last (no PG CardinalityViolation)."""
+    from energy_prices.storage.db import session_scope
+    from energy_prices.storage.repositories import PriceRepository
+
+    ds = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+    with session_scope() as s:
+        # Two rows with the same (market, zone, delivery_start, source) in ONE call.
+        PriceRepository(s).upsert([_price_row("NORD", ds, 10.0), _price_row("NORD", ds, 20.0)])
+    with session_scope() as s:
+        df = PriceRepository(s).get_prices("elec_dayahead", zone="NORD")
+    assert len(df) == 1
+    assert float(df["price"].iloc[0]) == 20.0
+
+
+def test_get_forecasts_does_not_blend_models_at_same_run(tmp_db):
+    """With model_name=None, get_forecasts must return one coherent model, not a blend."""
+    from energy_prices.storage.db import session_scope
+    from energy_prices.storage.repositories import ForecastRepository
+
+    run = dt.datetime(2026, 5, 30, tzinfo=dt.UTC)
+    target = dt.datetime(2026, 5, 31, tzinfo=dt.UTC)
+
+    def row(model, value):
+        return {
+            "run_at": run, "market": "elec_dayahead", "zone": "PUN",
+            "target_start": target, "resolution_minutes": 60,
+            "model_name": model, "quantile": 0.5, "value": value,
+        }
+
+    with session_scope() as s:
+        repo = ForecastRepository(s)
+        repo.save([row("model_a", 100.0)])
+        repo.save([row("model_b", 200.0)])
+    with session_scope() as s:
+        fc = ForecastRepository(s).get_forecasts("elec_dayahead", zone="PUN")
+    # Exactly one target row, from a single model (the most recent), not a blend.
+    assert len(fc) == 1
+    assert float(fc["q0.5"].iloc[0]) == 200.0
 
 
 # --- 15-minute electricity end-to-end (the 2025 reform feature) ------------
@@ -168,4 +231,12 @@ def test_15min_electricity_end_to_end(tmp_db):
             .limit(1)
         ).scalar_one()
     assert res == 15  # forecast emitted on the 15-min grid
-    assert len(fc) == 96  # one full delivery day = 96 quarter-hours
+    # One full LOCAL delivery day on the 15-min grid: 96 normally, 92/100 across a
+    # DST transition. Derive the expected count from the local-day span so the
+    # assertion is correct on every calendar date the suite might run.
+    start_local = (
+        pd.Timestamp(dt.datetime.now(dt.UTC)).tz_convert("Europe/Rome") + pd.Timedelta(days=1)
+    ).normalize()
+    end_local = start_local + pd.DateOffset(days=1)
+    expected = int((end_local.tz_convert("UTC") - start_local.tz_convert("UTC")) / pd.Timedelta(minutes=15))
+    assert len(fc) == expected
