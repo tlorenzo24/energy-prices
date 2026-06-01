@@ -58,12 +58,174 @@ _Q_LOW, _Q_LOWMID, _Q_MID, _Q_HIMID, _Q_HIGH = (
     "q0.9",
 )
 
-# Plotly colours.
-_C_OBSERVED = "#1f77b4"
-_C_FORECAST = "#d62728"
-_C_BAND_OUTER = "rgba(214,39,40,0.12)"
-_C_BAND_INNER = "rgba(214,39,40,0.25)"
-_C_TTF = "#2ca02c"
+# --- Aesthetic: refined energy trading-desk (dark) -------------------------
+# Committed palette; see _inject_css for the matching CSS variables.
+_BG = "#0A0E14"          # deep slate app background
+_SURFACE = "#121823"     # card surface
+_BORDER = "#1E2A38"      # hairline borders
+_TEXT = "#E6EDF3"        # primary text
+_MUTED = "#7D8B9A"       # secondary / muted text
+_GRID = "#19222E"        # chart gridlines
+_AMBER = "#FFB300"       # electricity accent (energy/gold)
+_TEAL = "#1FD1A3"        # gas accent
+_OBSERVED = "#5AA9FF"    # observed-price line (cool blue)
+
+# Distinct per-zone hues (electricity); PUN = bright neutral (it is an index).
+_ZONE_COLORS: dict[str, str] = {
+    "NORD": "#FFB300", "CNOR": "#FF7A45", "CSUD": "#FF4D6D", "SUD": "#C77DFF",
+    "CALA": "#4EA8FF", "SICI": "#1FD1A3", "SARD": "#9EE493", "PUN": "#E6EDF3",
+}
+
+
+def _hex_to_rgba(hex_color: str, alpha: float) -> str:
+    """'#RRGGBB' + alpha -> 'rgba(r,g,b,a)' for translucent fills."""
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+def _accent_for(market: str, zone: str | None) -> str:
+    """The accent colour for a market/zone selection."""
+    if market == Market.ELEC_DAYAHEAD.value and zone:
+        return _ZONE_COLORS.get(zone.upper(), _AMBER)
+    if market == Market.GAS_DAYAHEAD.value:
+        return _TEAL
+    return _AMBER
+
+
+# --- Look & feel (CSS + chart theme) ---------------------------------------
+# Hex values mirror the palette constants above (kept literal so the CSS block
+# stays a plain, brace-safe string).
+_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
+
+:root {
+  --bg:#0A0E14; --surface:#121823; --surface-2:#0F1620; --border:#1E2A38;
+  --text:#E6EDF3; --muted:#7D8B9A; --amber:#FFB300; --teal:#1FD1A3;
+}
+
+/* App canvas with a subtle top glow for atmosphere */
+[data-testid="stAppViewContainer"]{
+  background:
+    radial-gradient(1100px 480px at 18% -8%, rgba(255,179,0,.07), transparent 60%),
+    radial-gradient(900px 420px at 92% -6%, rgba(31,209,163,.06), transparent 60%),
+    var(--bg);
+}
+html, body, [class*="css"], [data-testid="stMarkdownContainer"]{
+  font-family:'Sora', system-ui, sans-serif; color:var(--text);
+}
+[data-testid="stMainBlockContainer"]{ padding-top:1.1rem; max-width:1280px; }
+
+/* Strip default Streamlit chrome for a cleaner product feel */
+#MainMenu, footer, [data-testid="stToolbar"]{ visibility:hidden; }
+header[data-testid="stHeader"]{ background:transparent; }
+
+/* Sidebar */
+[data-testid="stSidebar"]{
+  background:var(--surface-2); border-right:1px solid var(--border);
+}
+[data-testid="stSidebar"] .stRadio label, [data-testid="stSidebar"] label{ color:var(--text); }
+
+/* Header bar */
+.ep-header{
+  display:flex; align-items:center; justify-content:space-between; gap:1rem;
+  padding:16px 22px; margin:0 0 14px 0; border-radius:16px;
+  background:linear-gradient(135deg, rgba(255,179,0,.10), rgba(31,209,163,.06)), var(--surface);
+  border:1px solid var(--border);
+}
+.ep-brand{ display:flex; align-items:center; gap:13px; }
+.ep-logo{
+  width:42px; height:42px; border-radius:12px; display:grid; place-items:center;
+  font-size:22px; background:linear-gradient(135deg,#FFB300,#FF7A45);
+  box-shadow:0 6px 20px rgba(255,179,0,.28);
+}
+.ep-title{ font-size:1.32rem; font-weight:700; letter-spacing:.2px; line-height:1.1; }
+.ep-sub{ color:var(--muted); font-size:.78rem; font-weight:500; letter-spacing:.4px;
+  text-transform:uppercase; }
+.ep-pill{
+  font-family:'JetBrains Mono', monospace; font-size:.74rem; font-weight:700;
+  padding:7px 13px; border-radius:999px; border:1px solid var(--border);
+  display:inline-flex; align-items:center; gap:7px; white-space:nowrap;
+}
+.ep-pill::before{ content:''; width:8px; height:8px; border-radius:50%; }
+.ep-pill.fresh{ color:#9EE493; background:rgba(31,209,163,.10); }
+.ep-pill.fresh::before{ background:#1FD1A3; box-shadow:0 0 9px #1FD1A3; }
+.ep-pill.stale{ color:#FFCE66; background:rgba(255,179,0,.10); }
+.ep-pill.stale::before{ background:#FFB300; box-shadow:0 0 9px #FFB300; }
+.ep-pill.none{ color:var(--muted); background:rgba(125,139,154,.12); }
+.ep-pill.none::before{ background:var(--muted); }
+
+/* KPI cards */
+.ep-kpis{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin:4px 0 8px; }
+.ep-kpi{
+  background:var(--surface); border:1px solid var(--border); border-radius:14px;
+  padding:15px 17px; position:relative; overflow:hidden;
+  transition:transform .12s ease, border-color .12s ease;
+}
+.ep-kpi:hover{ transform:translateY(-2px); border-color:#2C3A4B; }
+.ep-kpi::after{ content:''; position:absolute; left:0; top:0; bottom:0; width:3px;
+  background:var(--accent); }
+.ep-kpi .lbl{ color:var(--muted); font-size:.72rem; font-weight:600; letter-spacing:.6px;
+  text-transform:uppercase; }
+.ep-kpi .val{ font-family:'JetBrains Mono', monospace; font-size:1.55rem; font-weight:700;
+  margin-top:6px; line-height:1; }
+.ep-kpi .unit{ color:var(--muted); font-size:.82rem; font-weight:500; }
+.ep-kpi .sub{ color:var(--muted); font-family:'JetBrains Mono', monospace; font-size:.74rem;
+  margin-top:6px; }
+
+/* Section headers */
+.ep-section{ display:flex; align-items:center; gap:10px; margin:22px 0 8px; }
+.ep-section .bar{ width:4px; height:20px; border-radius:3px; background:var(--accent); }
+.ep-section .txt{ font-size:1.06rem; font-weight:600; letter-spacing:.2px; }
+
+/* Plotly cards */
+[data-testid="stPlotlyChart"]{
+  background:var(--surface); border:1px solid var(--border); border-radius:14px;
+  padding:6px 8px 2px;
+}
+.ep-foot{ color:var(--muted); font-size:.74rem; margin-top:6px; }
+::-webkit-scrollbar{ width:10px; height:10px; }
+::-webkit-scrollbar-thumb{ background:#1E2A38; border-radius:8px; }
+</style>
+"""
+
+
+def _inject_css() -> None:
+    st.markdown(_CSS, unsafe_allow_html=True)
+
+
+def _style_fig(fig: go.Figure, height: int, accent: str) -> go.Figure:
+    """Apply the dark trading-desk theme to a Plotly figure."""
+    fig.update_layout(
+        height=height,
+        margin=dict(l=8, r=14, t=14, b=8),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="JetBrains Mono, monospace", size=12, color=_MUTED),
+        hovermode="x unified",
+        hoverlabel=dict(
+            bgcolor=_SURFACE, bordercolor=accent,
+            font=dict(family="JetBrains Mono, monospace", size=12, color=_TEXT),
+        ),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, x=0,
+            bgcolor="rgba(0,0,0,0)", font=dict(color=_MUTED, size=11),
+        ),
+        xaxis=dict(showgrid=False, zeroline=False, linecolor=_BORDER, color=_MUTED),
+        yaxis=dict(
+            title="€/MWh", gridcolor=_GRID, zeroline=False, linecolor=_BORDER, color=_MUTED,
+        ),
+    )
+    return fig
+
+
+def _section(title: str, accent: str) -> None:
+    st.markdown(
+        f"<div class='ep-section'><span class='bar' style='background:{accent}'></span>"
+        f"<span class='txt'>{title}</span></div>",
+        unsafe_allow_html=True,
+    )
 
 
 # --- Cached DB reads -------------------------------------------------------
@@ -132,39 +294,38 @@ def list_model_names(market: str, zone: str | None) -> list[str]:
 # --- Small helpers ---------------------------------------------------------
 
 
-def _fmt_eur(value: float | None) -> str:
-    """Format a EUR/MWh value, tolerating None/NaN."""
-    if value is None or pd.isna(value):
-        return "—"
-    return f"{value:,.2f} €/MWh"
-
-
 def _to_utc(d: dt.date, *, end_of_day: bool = False) -> dt.datetime:
     """Convert a date picked in the sidebar to a tz-aware UTC datetime."""
     t = dt.time(23, 59, 59) if end_of_day else dt.time(0, 0, 0)
     return dt.datetime.combine(d, t, tzinfo=dt.UTC)
 
 
-def _freshness_banner(latest: dt.datetime | None, tz: str) -> None:
-    """Render the 'last updated' banner from the latest observed delivery."""
+def _freshness_pill(latest: dt.datetime | None, tz: str) -> str:
+    """Live data-freshness badge (HTML) from the latest observed delivery."""
     if latest is None:
-        st.info(
-            "Nessun dato disponibile. Esegui `energy seed-demo` per dati "
-            "sintetici di esempio oppure `energy ingest` per dati reali."
-        )
-        return
-    # latest is a tz-aware UTC datetime; show it in the configured local tz.
+        return "<span class='ep-pill none'>NESSUN DATO</span>"
     shown = pd.Timestamp(latest).tz_convert(tz)
-    now = dt.datetime.now(dt.UTC)
-    age_h = (now - latest).total_seconds() / 3600.0
-    label = shown.strftime("%Y-%m-%d %H:%M %Z")
+    age_h = (dt.datetime.now(dt.UTC) - latest).total_seconds() / 3600.0
+    label = shown.strftime("%d %b %H:%M")
     if age_h <= 36:
-        st.success(f"Ultimo dato di consegna: {label} (≈{age_h:.0f} h fa).")
-    else:
-        st.warning(
-            f"Ultimo dato di consegna: {label} (≈{age_h / 24:.1f} giorni fa). "
-            "I dati potrebbero non essere aggiornati — esegui `energy ingest`."
-        )
+        return f"<span class='ep-pill fresh'>LIVE · {label} (≈{age_h:.0f}h fa)</span>"
+    return f"<span class='ep-pill stale'>{label} (≈{age_h / 24:.1f}g fa)</span>"
+
+
+def _header(market_name: str, zone: str | None, latest: dt.datetime | None, tz: str) -> None:
+    """Top brand bar: logo, title/subtitle and the live freshness pill."""
+    zone_label = f" · {zone}" if zone else ""
+    st.markdown(
+        "<div class='ep-header'>"
+        "<div class='ep-brand'>"
+        "<div class='ep-logo'>⚡</div>"
+        "<div><div class='ep-title'>GME · Energy Desk</div>"
+        f"<div class='ep-sub'>{market_name}{zone_label} — prezzi & previsioni probabilistiche</div>"
+        "</div></div>"
+        f"{_freshness_pill(latest, tz)}"
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def _empty_message(what: str) -> None:
@@ -186,32 +347,24 @@ def _resample_for_plot(s: pd.Series, max_points: int = 2000) -> pd.Series:
 # --- Chart builders --------------------------------------------------------
 
 
-def _observed_chart(prices: pd.DataFrame, title: str, tz: str) -> go.Figure:
-    """Line chart of recent observed prices (local-time x-axis)."""
+def _observed_chart(prices: pd.DataFrame, tz: str, accent: str) -> go.Figure:
+    """Area+line chart of recent observed prices (local-time x-axis)."""
     fig = go.Figure()
     if not prices.empty:
         series = _resample_for_plot(prices["price"].sort_index())
-        x = series.index.tz_convert(tz)
         fig.add_trace(
             go.Scatter(
-                x=x,
+                x=series.index.tz_convert(tz),
                 y=series.to_numpy(),
                 mode="lines",
                 name="Osservato",
-                line=dict(color=_C_OBSERVED, width=1.6),
-                hovertemplate="%{x|%d %b %H:%M}<br>%{y:.2f} €/MWh<extra></extra>",
+                line=dict(color=accent, width=1.8, shape="spline", smoothing=0.4),
+                fill="tozeroy",
+                fillcolor=_hex_to_rgba(accent, 0.06),
+                hovertemplate="%{x|%d %b %H:%M}  <b>%{y:.2f}</b> €/MWh<extra></extra>",
             )
         )
-    fig.update_layout(
-        title=title,
-        xaxis_title=f"Tempo ({tz})",
-        yaxis_title="€/MWh",
-        margin=dict(l=10, r=10, t=40, b=10),
-        height=360,
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-    )
-    return fig
+    return _style_fig(fig, height=320, accent=accent)
 
 
 def _add_band(
@@ -237,16 +390,16 @@ def _add_band(
 def _forecast_chart(
     forecast: pd.DataFrame,
     actuals: pd.Series | None,
-    title: str,
     tz: str,
+    accent: str,
 ) -> go.Figure:
     """Forecast chart: q0.1-q0.9 + q0.25-q0.75 bands, median, and actuals."""
     fig = go.Figure()
     fc = forecast.sort_index()
     x = fc.index.tz_convert(tz)
 
-    _add_band(fig, x, fc, _Q_LOW, _Q_HIGH, _C_BAND_OUTER, "Banda 10–90%")
-    _add_band(fig, x, fc, _Q_LOWMID, _Q_HIMID, _C_BAND_INNER, "Banda 25–75%")
+    _add_band(fig, x, fc, _Q_LOW, _Q_HIGH, _hex_to_rgba(accent, 0.12), "Banda 10–90%")
+    _add_band(fig, x, fc, _Q_LOWMID, _Q_HIMID, _hex_to_rgba(accent, 0.24), "Banda 25–75%")
 
     # Median (point forecast).
     if _Q_MID in fc.columns:
@@ -254,8 +407,8 @@ def _forecast_chart(
             go.Scatter(
                 x=x, y=fc[_Q_MID].to_numpy(), mode="lines",
                 name="Previsione (mediana)",
-                line=dict(color=_C_FORECAST, width=2.2),
-                hovertemplate="%{x|%d %b %H:%M}<br>%{y:.2f} €/MWh<extra></extra>",
+                line=dict(color=accent, width=2.6, shape="spline", smoothing=0.4),
+                hovertemplate="%{x|%d %b %H:%M}  <b>%{y:.2f}</b> €/MWh<extra></extra>",
             )
         )
 
@@ -266,28 +419,28 @@ def _forecast_chart(
             go.Scatter(
                 x=ax.index.tz_convert(tz), y=ax.to_numpy(), mode="lines",
                 name="Osservato (reale)",
-                line=dict(color=_C_OBSERVED, width=1.6, dash="dot"),
-                hovertemplate="%{x|%d %b %H:%M}<br>%{y:.2f} €/MWh<extra></extra>",
+                line=dict(color=_OBSERVED, width=1.8, dash="dot"),
+                hovertemplate="%{x|%d %b %H:%M}  <b>%{y:.2f}</b> €/MWh<extra></extra>",
             )
         )
-
-    fig.update_layout(
-        title=title,
-        xaxis_title=f"Tempo ({tz})",
-        yaxis_title="€/MWh",
-        margin=dict(l=10, r=10, t=40, b=10),
-        height=400,
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-    )
-    return fig
+    return _style_fig(fig, height=400, accent=accent)
 
 
 # --- KPI + sections --------------------------------------------------------
 
 
-def _render_kpis(prices: pd.DataFrame, forecast: pd.DataFrame) -> None:
-    """Latest price, next-period forecast, and day min/max metrics."""
+def _kpi_card(label: str, value: float | None, accent: str, sub: str = "") -> str:
+    """One KPI card as HTML (mono value, accent bar, optional sub-line)."""
+    val = f"{value:,.2f}<span class='unit'> €/MWh</span>" if value is not None else "—"
+    sub_html = f"<div class='sub'>{sub}</div>" if sub else ""
+    return (
+        f"<div class='ep-kpi' style='--accent:{accent}'>"
+        f"<div class='lbl'>{label}</div><div class='val'>{val}</div>{sub_html}</div>"
+    )
+
+
+def _render_kpis(prices: pd.DataFrame, forecast: pd.DataFrame, accent: str) -> None:
+    """Latest price, next-period forecast, and day min/max as hero cards."""
     latest_price = next_fc = day_min = day_max = None
 
     if not prices.empty:
@@ -302,11 +455,20 @@ def _render_kpis(prices: pd.DataFrame, forecast: pd.DataFrame) -> None:
         if not fmid.empty:
             next_fc = float(fmid.iloc[0])
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Ultimo prezzo", _fmt_eur(latest_price))
-    c2.metric("Prossima previsione", _fmt_eur(next_fc))
-    c3.metric("Min (24h)", _fmt_eur(day_min))
-    c4.metric("Max (24h)", _fmt_eur(day_max))
+    # Forecast-vs-last delta as the "Prossima previsione" sub-line.
+    delta = ""
+    if next_fc is not None and latest_price is not None and latest_price != 0:
+        pct = (next_fc - latest_price) / abs(latest_price) * 100
+        arrow = "▲" if pct >= 0 else "▼"
+        delta = f"{arrow} {pct:+.1f}% vs ultimo"
+
+    cards = (
+        _kpi_card("Ultimo prezzo", latest_price, accent)
+        + _kpi_card("Prossima previsione", next_fc, accent, delta)
+        + _kpi_card("Min · 24h", day_min, accent)
+        + _kpi_card("Max · 24h", day_max, accent)
+    )
+    st.markdown(f"<div class='ep-kpis'>{cards}</div>", unsafe_allow_html=True)
 
 
 def _actuals_over_forecast(
@@ -324,24 +486,26 @@ def _actuals_over_forecast(
 
 
 def _render_forecast_section(
-    market: str, zone: str | None, model_name: str | None, tz: str, title: str
+    market: str, zone: str | None, model_name: str | None, tz: str
 ) -> None:
     """Forecast chart + run caption, defensive against missing forecasts."""
     forecast = load_forecast(market, zone, model_name)
     if forecast.empty:
         _empty_message("previsione disponibile")
         return
-    run_at = load_forecast_run_at(market, zone, model_name)
-    if run_at is not None:
-        st.caption(
-            "Ultima esecuzione del modello: "
-            f"{pd.Timestamp(run_at).tz_convert(tz).strftime('%Y-%m-%d %H:%M %Z')}"
-        )
+    accent = _accent_for(market, zone)
     actuals = _actuals_over_forecast(market, zone, forecast)
     st.plotly_chart(
-        _forecast_chart(forecast, actuals, title, tz),
+        _forecast_chart(forecast, actuals, tz, accent),
         width="stretch",
     )
+    run_at = load_forecast_run_at(market, zone, model_name)
+    if run_at is not None:
+        st.markdown(
+            "<div class='ep-foot'>Ultima esecuzione del modello: "
+            f"{pd.Timestamp(run_at).tz_convert(tz).strftime('%Y-%m-%d %H:%M %Z')}</div>",
+            unsafe_allow_html=True,
+        )
 
 
 def _render_ttf_overlay(tz: str, default_window: tuple[dt.datetime, dt.datetime]) -> None:
@@ -356,20 +520,13 @@ def _render_ttf_overlay(tz: str, default_window: tuple[dt.datetime, dt.datetime]
     fig.add_trace(
         go.Scatter(
             x=s.index.tz_convert(tz), y=s.to_numpy(), mode="lines",
-            name="TTF", line=dict(color=_C_TTF, width=1.8),
-            hovertemplate="%{x|%d %b}<br>%{y:.2f} €/MWh<extra></extra>",
+            name="TTF", line=dict(color=_TEAL, width=2.0, shape="spline", smoothing=0.4),
+            fill="tozeroy", fillcolor=_hex_to_rgba(_TEAL, 0.06),
+            hovertemplate="%{x|%d %b}  <b>%{y:.2f}</b> €/MWh<extra></extra>",
         )
     )
-    fig.update_layout(
-        title="Benchmark TTF (giornaliero)",
-        xaxis_title=f"Tempo ({tz})",
-        yaxis_title="€/MWh",
-        margin=dict(l=10, r=10, t=40, b=10),
-        height=320,
-        hovermode="x unified",
-    )
-    st.plotly_chart(fig, width="stretch")
-    st.caption(_TTF_SOURCE)
+    st.plotly_chart(_style_fig(fig, height=300, accent=_TEAL), width="stretch")
+    st.markdown(f"<div class='ep-foot'>{_TTF_SOURCE}</div>", unsafe_allow_html=True)
 
 
 # --- Sidebar ---------------------------------------------------------------
@@ -469,55 +626,49 @@ def main() -> None:
         page_icon="⚡",
         layout="wide",
     )
+    _inject_css()
     _require_password(settings)
-    st.title("GME — Prezzi Energia & Previsioni")
+
+    sel = _sidebar(tz)
+    market: Market = sel["market"]
+    zone: str | None = sel["zone"]
+    accent = _accent_for(market.value, zone)
+    market_name = "Elettricità" if market is Market.ELEC_DAYAHEAD else "Gas (PSV)"
+
+    latest = load_latest_delivery(market.value, zone)
+    _header(market_name, zone, latest, tz)
 
     if settings.demo_mode:
         st.error(
             "⚠️ DATI DEMO SINTETICI — i valori mostrati sono generati "
             "artificialmente e NON rappresentano prezzi di mercato reali."
         )
-
-    sel = _sidebar(tz)
-    market: Market = sel["market"]
-    zone: str | None = sel["zone"]
-
-    # Freshness banner from the latest observed delivery for the selection.
-    latest = load_latest_delivery(market.value, zone)
-    _freshness_banner(latest, tz)
-
-    zone_label = f" — Zona {zone}" if zone else ""
-    market_name = "Elettricità" if market is Market.ELEC_DAYAHEAD else "Gas (PSV)"
+    if latest is None:
+        st.info(
+            "Nessun dato disponibile. Esegui `energy seed-demo` per dati sintetici "
+            "oppure `energy ingest` per i dati reali."
+        )
 
     # --- Observed prices ---
     prices = load_prices(market.value, zone, sel["start"], sel["end"])
-    st.subheader(f"Prezzi osservati — {market_name}{zone_label}")
+    _section(f"Prezzi osservati · {market_name}", accent)
     if prices.empty:
         _empty_message("prezzo osservato")
     else:
-        _render_kpis(prices, load_forecast(market.value, zone, sel["model_name"]))
-        st.plotly_chart(
-            _observed_chart(prices, f"Prezzi {market_name}{zone_label}", tz),
-            width="stretch",
-        )
+        _render_kpis(prices, load_forecast(market.value, zone, sel["model_name"]), accent)
+        st.plotly_chart(_observed_chart(prices, tz, accent), width="stretch")
 
     # --- Forecast vs actual ---
-    st.subheader("Previsione probabilistica")
-    _render_forecast_section(
-        market.value,
-        zone,
-        sel["model_name"],
-        tz,
-        f"Previsione {market_name}{zone_label}",
-    )
+    _section("Previsione probabilistica", accent)
+    _render_forecast_section(market.value, zone, sel["model_name"], tz)
 
     # --- Gas: TTF overlay ---
     if market is Market.GAS_DAYAHEAD:
-        st.subheader("Confronto con il benchmark europeo")
+        _section("Confronto con il benchmark europeo TTF", _TEAL)
         _render_ttf_overlay(tz, (sel["start"], sel["end"]))
 
     st.divider()
-    st.caption(_ATTRIBUTION)
+    st.markdown(f"<div class='ep-foot'>{_ATTRIBUTION}</div>", unsafe_allow_html=True)
 
 
 # Streamlit runs the module top-to-bottom on each rerun, so invoke main()

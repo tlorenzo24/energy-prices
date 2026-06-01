@@ -1,0 +1,14 @@
+# Energy desk theme — dark, refined. Fonts are injected via CSS in app.py so
+# they work across Streamlit versions (Sora for UI, JetBrains Mono for data).
+[theme]
+base = "dark"
+primaryColor = "#FFB300"
+backgroundColor = "#0A0E14"
+secondaryBackgroundColor = "#121823"
+textColor = "#E6EDF3"
+
+[client]
+toolbarMode = "minimal"
+
+[ui]
+hideTopBar = true
