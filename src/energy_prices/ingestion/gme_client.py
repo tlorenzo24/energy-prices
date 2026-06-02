@@ -593,6 +593,13 @@ def _build_price_obs(
 
     hour = _as_int(_first(lookup, _HOUR_KEYS))
     quarter = _as_int(_first(lookup, _QUARTER_KEYS))
+    # Pre-reform hourly payloads (delivery < 2025-10-01) carry Period="0" as a
+    # "no sub-period" sentinel, NOT a real 15-min slot. Validated against the live
+    # API (2026-06-02): hourly rows are Hour=1..24, Period=0. The PT15 era uses
+    # Period=1..96. Treat any quarter < 1 as absent so hourly rows decode to their
+    # Hour slot instead of all collapsing onto (local-midnight - 15 min).
+    if quarter is not None and quarter < 1:
+        quarter = None
 
     if hour is None:
         midnight = dt.datetime(flow_date.year, flow_date.month, flow_date.day, tzinfo=_ROME)

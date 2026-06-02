@@ -1,5 +1,15 @@
 # PSV day-ahead gas backtest — TTF + basis cointegration (REAL data)
 
+> ## Update 2026-06-02 — re-confirmed on extended history
+>
+> Re-run as part of the 2026-06-02 re-backtest (`scripts/confirm_cqr_gas.py`, the
+> actual shipping `PsvBasisForecaster` with TTF wired as `exog['ttf']`):
+> **psv_basis day-ahead rMAE 0.326, MAE 0.99 (30 windows)** — even better than the
+> 0.411 below, and well clear of the sarimax/ensemble alternatives (both ~0.545 on
+> the same broad-matrix run, `scripts/rebacktest_matrix.py`). Coverage 1.00 vs 0.80
+> nominal (conservative/wide on the small daily sample). The gas production choice
+> (`psv_basis`) is **re-confirmed**.
+
 Rolling-origin walk-forward on the **real ingested daily series** (no synthetic
 data): PSV day-ahead gas (`gas_dayahead`, GME) **240 obs, 2025-10-02 → 2026-05-30**
 (mean 39.74, std 8.81 EUR/MWh) with the Dutch **TTF** benchmark (yfinance, 1612 obs,
