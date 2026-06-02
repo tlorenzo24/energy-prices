@@ -155,6 +155,30 @@ class TestGmeBuildPriceObs:
         assert obs["delivery_start"] == dt.datetime(2025, 1, 14, 23, 0, tzinfo=_UTC)
         assert obs["resolution_minutes"] == 60
 
+    def test_prereform_hourly_period_zero_sentinel(self):
+        """Pre-reform hourly rows carry Period="0" (not None): must decode hourly.
+
+        Regression: Period="0" is the live API's "no sub-period" sentinel for the
+        pre-2025-10-01 hourly era. It must NOT be read as a 15-min slot, or all 24
+        hours of a day collapse onto (local-midnight - 15 min) and the upsert keeps
+        only one price per day. Hours 1 and 24 must map to distinct hourly UTC
+        instants 23h apart, both at 60-min resolution.
+        """
+        rows = []
+        for hour in (1, 24):
+            rec = {"FlowDate": "20200601", "Hour": str(hour), "Period": "0",
+                   "Zone": "NORD", "Price": "20.0"}
+            obs = gme._build_price_obs(
+                gme._build_lookup(rec), Market.ELEC_DAYAHEAD.value, Zone.NORD.value
+            )
+            assert obs is not None
+            assert obs["resolution_minutes"] == 60
+            rows.append(obs["delivery_start"])
+        # Summer CEST (UTC+2): local midnight 2020-06-01 == 22:00 UTC 2020-05-31.
+        assert rows[0] == dt.datetime(2020, 5, 31, 22, 0, tzinfo=_UTC)
+        assert rows[1] == dt.datetime(2020, 6, 1, 21, 0, tzinfo=_UTC)
+        assert (rows[1] - rows[0]) == dt.timedelta(hours=23)
+
     def test_no_hour_is_treated_as_daily(self):
         """A record with no Hour/Period -> daily (1440-min) national price."""
         rec = {"Data": "2025-01-15", "Price": "55.5"}

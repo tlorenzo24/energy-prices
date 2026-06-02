@@ -177,11 +177,24 @@ def backtest(
         "Default: one full delivery day (96 for 15-min, 24 hourly, 1 daily).",
     ),
     windows: int = typer.Option(30, help="Number of rolling-origin windows."),
+    start: str = typer.Option(
+        None, help="Restrict history to delivery >= this date YYYY-MM-DD. "
+        "Use to isolate one resolution era (e.g. the hourly pre-2025-10-01 market)."
+    ),
+    end: str = typer.Option(
+        None, help="Restrict history to delivery <= this date YYYY-MM-DD."
+    ),
     calibrate: bool = typer.Option(
         False, "--calibrate", help="Wrap the model in CQR conformal calibration."
     ),
 ) -> None:
-    """Rolling-origin walk-forward backtest with rMAE / pinball / coverage metrics."""
+    """Rolling-origin walk-forward backtest with rMAE / pinball / coverage metrics.
+
+    Pass ``--start``/``--end`` to confine the backtest to a single resolution era:
+    the walk-forward infers its horizon from the series' median spacing and slices
+    positionally, so a window mixing the hourly (pre-2025-10-01) and 15-minute
+    markets would produce an incoherent horizon. Keep one era per run.
+    """
     _setup_logging()
     import importlib
 
@@ -193,9 +206,23 @@ def backtest(
     is_elec = market_value == Market.ELEC_DAYAHEAD.value
     lookup_zone = _validate_elec_zone(zone) if is_elec else None
 
+    start_date = _parse_date(start)
+    end_date = _parse_date(end)
+    # get_prices bounds on the UTC delivery_start. Anchor start at that day's
+    # midnight UTC; make end inclusive of its whole day by bounding at the next
+    # midnight (the repo uses <=, so one boundary slot leaks — immaterial here).
+    start_dt = (
+        dt.datetime(start_date.year, start_date.month, start_date.day, tzinfo=dt.UTC)
+        if start_date else None
+    )
+    end_dt = (
+        dt.datetime(end_date.year, end_date.month, end_date.day, tzinfo=dt.UTC)
+        + dt.timedelta(days=1)
+        if end_date else None
+    )
     with session_scope() as session:
         prices = PriceRepository(session)
-        df = prices.get_prices(market_value, zone=lookup_zone)
+        df = prices.get_prices(market_value, zone=lookup_zone, start=start_dt, end=end_dt)
     if df.empty:
         console.print("[red]No price history.[/] Run `energy seed-demo` or `energy ingest` first.")
         raise typer.Exit(code=1)
