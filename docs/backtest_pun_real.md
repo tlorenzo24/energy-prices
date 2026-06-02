@@ -1,5 +1,31 @@
 # PUN day-ahead backtest — REAL data (242 days, refreshed 2026-05-31)
 
+> ## Update 2026-06-02 — extended hourly history (multi-regime, ~3y)
+>
+> A GME **hourly** backfill (2021-01 → 2025-09-30) added ~3 years of pre-reform
+> data, enabling a backtest across distinct regimes that the 242-day 15-min sample
+> could not reach. Two large gap-free blocks were used (the backfill left 6 mid-range
+> gaps from GME rate-limiting). Reproduce with `scripts/rebacktest_matrix.py`
+> (broad, CQR off) and `scripts/confirm_cqr_gas.py` (CQR coverage check).
+>
+> **LightGBM beats the ensemble in every regime** (rMAE, raw LightGBM, no CQR):
+>
+> | regime | LightGBM | ensemble (LEAR+LGBM) | baseline |
+> |---|---|---|---|
+> | hourly crisis 2021-04→2022-04 (60 win) | **0.477** | 0.611 | 1.001 |
+> | hourly recent 2025-03→09 (60 win)      | **0.731** | 0.937 | 1.014 |
+> | 15-min post-reform 2025-10→ (30 win)   | **0.672** | 0.826 | 1.001 |
+>
+> This **confirms the LightGBM decision** on far more data and regime diversity than
+> the original 242-day run — the conclusion is now robust, not sample-specific.
+>
+> **CQR coverage (LightGBM+CQR, hourly recent, 12 win):** rMAE 0.731 (unchanged),
+> MAE 6.89, **coverage 0.79 / 0.80** — i.e. on the **hourly** series CQR lands
+> essentially *on* nominal, NOT over-covering. This differs from the 15-min 242-day
+> finding below (CQR ≈0.96, over-covers): the calibration behaviour is
+> resolution/regime-dependent, so the "structural over-cover" claim is specific to
+> the calmer 15-min tail, not universal. Net: LightGBM+CQR is well-justified on both.
+
 Rolling-origin walk-forward on the **real GME electricity series**: **PUN, 15-min,
 23 232 quarter-hours = 242 days** (2025-09-30 → 2026-05-30; price mean 121.8,
 std 31.7, min 0.0, max 279.8 EUR/MWh), **48 windows**. Reproduce with
